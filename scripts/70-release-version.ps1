@@ -6,7 +6,7 @@ $ScriptPath = $MyInvocation.MyCommand.Path
 $ScriptDir = Split-Path -Parent $ScriptPath
 $ToolRoot = Split-Path -Parent $ScriptDir
 $ConfPath = Join-Path $ToolRoot "release.conf"
-$ToolVersion = "1.0.0"
+$ToolVersion = "release-tool-v12"
 
 function Write-Info([string]$Text) { Write-Host $Text -ForegroundColor Cyan }
 function Write-Ok([string]$Text) { Write-Host $Text -ForegroundColor Green }
@@ -40,9 +40,6 @@ function ConfBool([string]$Name, [bool]$Default = $false) {
 }
 
 function Resolve-CommandPath([string]$Name) {
-  # 必须解析到外部可执行文件，不能返回裸命令名。
-  # PowerShell 命令名大小写不敏感，如果脚本里有 Invoke-Git/Git 之类函数，
-  # 裸命令名可能被解析到函数，从而造成递归调用和“调用深度溢出”。
   $cmd = Get-Command $Name -CommandType Application, ExternalScript -ErrorAction SilentlyContinue | Select-Object -First 1
   if (!$cmd) { throw "未找到外部命令：$Name。请确认它已经安装并加入 PATH。" }
 
@@ -59,10 +56,10 @@ function Resolve-CommandPath([string]$Name) {
   throw "无法解析外部命令的真实路径：$Name。"
 }
 
-function Normalize-ArgList([object[]]$Items) {
+function ConvertTo-StringArray([object]$Items) {
   $list = New-Object System.Collections.Generic.List[string]
   if ($null -eq $Items) { return [string[]]@() }
-  foreach ($item in $Items) {
+  foreach ($item in @($Items)) {
     if ($null -eq $item) { continue }
     if (($item -is [System.Array]) -and -not ($item -is [string])) {
       foreach ($sub in $item) {
@@ -76,7 +73,40 @@ function Normalize-ArgList([object[]]$Items) {
   return [string[]]$list.ToArray()
 }
 
-function Invoke-Text {
+function Join-ProcessArguments([string[]]$ArgList) {
+  $parts = New-Object System.Collections.Generic.List[string]
+  foreach ($arg in $ArgList) {
+    if ($null -eq $arg) { $arg = "" }
+    $s = [string]$arg
+    if ($s.Length -eq 0) { [void]$parts.Add('""'); continue }
+    if ($s -notmatch '[\s"]') { [void]$parts.Add($s); continue }
+
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.Append('"')
+    $bs = 0
+    for ($i = 0; $i -lt $s.Length; $i++) {
+      $ch = $s[$i]
+      if ($ch -eq '\\') {
+        $bs++
+        continue
+      }
+      if ($ch -eq '"') {
+        if ($bs -gt 0) { [void]$sb.Append(('\\' * ($bs * 2 + 1))) } else { [void]$sb.Append('\\') }
+        [void]$sb.Append('"')
+        $bs = 0
+        continue
+      }
+      if ($bs -gt 0) { [void]$sb.Append(('\\' * $bs)); $bs = 0 }
+      [void]$sb.Append($ch)
+    }
+    if ($bs -gt 0) { [void]$sb.Append(('\\' * ($bs * 2))) }
+    [void]$sb.Append('"')
+    [void]$parts.Add($sb.ToString())
+  }
+  return ($parts -join ' ')
+}
+
+function Invoke-ProcessText {
   param(
     [Parameter(Mandatory = $true)]
     [string]$File,
@@ -90,22 +120,38 @@ function Invoke-Text {
   if ([string]::IsNullOrWhiteSpace($File)) { throw "内部错误：外部命令路径为空。" }
   if (!(Test-Path -LiteralPath $File -PathType Leaf)) { throw "外部命令不存在：$File" }
 
-  $normalizedArgs = Normalize-ArgList $CommandArgs
+  $argArray = ConvertTo-StringArray $CommandArgs
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = $File
+  $psi.Arguments = Join-ProcessArguments $argArray
+  if ($WorkingDirectory) { $psi.WorkingDirectory = $WorkingDirectory }
+  $psi.UseShellExecute = $false
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError = $true
+  $psi.CreateNoWindow = $true
+  $psi.StandardOutputEncoding = [Text.Encoding]::UTF8
+  $psi.StandardErrorEncoding = [Text.Encoding]::UTF8
 
-  $old = (Get-Location).Path
+  $p = New-Object System.Diagnostics.Process
+  $p.StartInfo = $psi
   try {
-    if ($WorkingDirectory) { Set-Location -LiteralPath $WorkingDirectory }
-    $out = & $File @normalizedArgs 2>&1
-    $code = $LASTEXITCODE
-    $text = ($out | ForEach-Object { [string]$_ }) -join "`r`n"
-    if ($code -ne 0 -and !$AllowFail) {
-      throw "命令执行失败：$File $($normalizedArgs -join ' ')`r`n$text"
-    }
-    return [pscustomobject]@{ Code = $code; Out = $text }
+    [void]$p.Start()
   }
-  finally {
-    Set-Location -LiteralPath $old
+  catch {
+    throw "无法启动外部命令：$File`r`n参数：$($psi.Arguments)`r`n$($_.Exception.Message)"
   }
+
+  $stdout = $p.StandardOutput.ReadToEnd()
+  $stderr = $p.StandardError.ReadToEnd()
+  $p.WaitForExit()
+  $code = $p.ExitCode
+  $text = (($stdout, $stderr | Where-Object { $_ }) -join "`r`n").TrimEnd()
+
+  if ($code -ne 0 -and !$AllowFail) {
+    throw "命令执行失败：$File $($psi.Arguments)`r`n$text"
+  }
+
+  return [pscustomobject]@{ Code = $code; Out = $text; Stdout = $stdout; Stderr = $stderr }
 }
 
 function Sanitize-PathText([string]$PathText) {
@@ -126,7 +172,7 @@ function Resolve-GitRoot() {
   foreach ($candidate in $candidates) {
     $c = Sanitize-PathText $candidate
     if (!$c -or !(Test-Path -LiteralPath $c)) { continue }
-    $r = Invoke-Text -File $GitExe -CommandArgs @("-C", $c, "rev-parse", "--show-toplevel") -AllowFail
+    $r = Invoke-ProcessText -File $GitExe -CommandArgs @("-C", $c, "rev-parse", "--show-toplevel") -AllowFail
     if ($r.Code -eq 0 -and $r.Out.Trim()) {
       return (Resolve-Path -LiteralPath (Sanitize-PathText $r.Out)).Path
     }
@@ -150,87 +196,16 @@ function Invoke-Git {
     [switch]$AllowFail
   )
 
-  $normalizedGitArgs = Normalize-ArgList $GitArgs
+  $normalizedGitArgs = ConvertTo-StringArray $GitArgs
   if ($normalizedGitArgs.Count -lt 1 -or [string]::IsNullOrWhiteSpace($normalizedGitArgs[0])) {
     throw "内部错误：Git 参数为空。"
   }
 
-  $allArgs = New-Object System.Collections.Generic.List[string]
-  [void]$allArgs.Add("-C")
-  [void]$allArgs.Add($GitRoot)
-  foreach ($a in $normalizedGitArgs) { [void]$allArgs.Add([string]$a) }
-
-  return Invoke-Text -File $GitExe -CommandArgs ([string[]]$allArgs.ToArray()) -AllowFail:$AllowFail
-}
-
-function Get-GitRelativePath([string]$Path) {
-  if ([string]::IsNullOrWhiteSpace($Path)) { return $null }
-
-  $p = Sanitize-PathText $Path
-  if ([string]::IsNullOrWhiteSpace($p)) { return $null }
-
-  # git add 对绝对路径、中文路径、忽略规则叠加时更容易出现难懂报错。
-  # 这里统一转换成相对仓库根目录的路径，并使用正斜杠，交给 git 处理。
-  if (![IO.Path]::IsPathRooted($p)) {
-    $candidate = Join-Path $GitRoot $p
-  }
-  else {
-    $candidate = $p
-  }
-
-  $full = [IO.Path]::GetFullPath($candidate)
-  $rootFull = [IO.Path]::GetFullPath($GitRoot)
-  if (!$rootFull.EndsWith([IO.Path]::DirectorySeparatorChar)) { $rootFull += [IO.Path]::DirectorySeparatorChar }
-
-  if (!$full.StartsWith($rootFull, [StringComparison]::OrdinalIgnoreCase)) {
-    Write-Warn "跳过仓库外路径：$Path"
-    return $null
-  }
-
-  $rel = $full.Substring($rootFull.Length)
-  return ($rel -replace '\\', '/')
-}
-
-function Test-GitPathIgnored([string]$RelativePath) {
-  if ([string]::IsNullOrWhiteSpace($RelativePath)) { return $false }
-
-  # 已被 Git 跟踪的文件即使匹配 .gitignore，也应该允许 git add 更新。
-  $tracked = Invoke-Git @("ls-files", "--error-unmatch", "--", $RelativePath) -AllowFail
-  if ($tracked.Code -eq 0) { return $false }
-
-  $ignored = Invoke-Git @("check-ignore", "-q", "--", $RelativePath) -AllowFail
-  return ($ignored.Code -eq 0)
-}
-
-function Add-ReleaseChangedFiles([string[]]$Paths) {
-  $added = 0
-  $unique = @($Paths | Where-Object { $_ } | Select-Object -Unique)
-
-  foreach ($p in $unique) {
-    $rel = Get-GitRelativePath $p
-    if (!$rel) { continue }
-
-    # 删除操作已经由 git rm 处理过，这里不再 git add 一个不存在的路径。
-    $full = Join-Path $GitRoot ($rel -replace '/', [IO.Path]::DirectorySeparatorChar)
-    if (!(Test-Path -LiteralPath $full)) {
-      continue
-    }
-
-    if (Test-GitPathIgnored $rel) {
-      Write-Warn "跳过被 .gitignore 忽略的未跟踪路径：$rel"
-      continue
-    }
-
-    [void](Invoke-Git @("add", "--", $rel))
-    $added++
-  }
-
-  return $added
-}
-
-function Test-StagedChangesExist() {
-  $r = Invoke-Git @("diff", "--cached", "--quiet") -AllowFail
-  return ($r.Code -ne 0)
+  $all = New-Object System.Collections.Generic.List[string]
+  [void]$all.Add("-C")
+  [void]$all.Add($GitRoot)
+  foreach ($a in $normalizedGitArgs) { [void]$all.Add([string]$a) }
+  return Invoke-ProcessText -File $GitExe -CommandArgs ([string[]]$all.ToArray()) -AllowFail:$AllowFail
 }
 
 function Get-TextFileState([string]$Path) {
@@ -262,7 +237,6 @@ function Get-TextFileState([string]$Path) {
   $text = if ($bytes.Length -gt $offset) { $encoding.GetString($bytes, $offset, $bytes.Length - $offset) } else { "" }
   return [pscustomobject]@{
     Path         = $Path
-    Bytes        = $bytes
     Text         = $text
     Encoding     = $encoding
     EncodingName = $encodingName
@@ -494,20 +468,20 @@ function Create-ReleaseZip([string]$Version, [string]$Ref) {
 function Ensure-GhRelease([string]$Tag, [string]$ZipPath, [string]$NotesPath) {
   if (!(ConfBool "CREATE_GITHUB_RELEASE" $true)) { return }
   $gh = Resolve-CommandPath "gh"
-  $status = Invoke-Text -File $gh -CommandArgs @("auth", "status") -WorkingDirectory $GitRoot -AllowFail
+  $status = Invoke-ProcessText -File $gh -CommandArgs @("auth", "status") -WorkingDirectory $GitRoot -AllowFail
   if ($status.Code -ne 0) { throw "GitHub CLI 未登录。请先运行：gh auth login" }
 
-  $view = Invoke-Text -File $gh -CommandArgs @("release", "view", $Tag) -WorkingDirectory $GitRoot -AllowFail
+  $view = Invoke-ProcessText -File $gh -CommandArgs @("release", "view", $Tag) -WorkingDirectory $GitRoot -AllowFail
   if ($view.Code -eq 0) {
     Write-Warn "GitHub Release 已存在，将覆盖上传发行包资产：$Tag"
-    [void](Invoke-Text -File $gh -CommandArgs @("release", "upload", $Tag, $ZipPath, "--clobber") -WorkingDirectory $GitRoot)
+    [void](Invoke-ProcessText -File $gh -CommandArgs @("release", "upload", $Tag, $ZipPath, "--clobber") -WorkingDirectory $GitRoot)
   }
   else {
-    [void](Invoke-Text -File $gh -CommandArgs @("release", "create", $Tag, $ZipPath, "--title", $Tag, "--notes-file", $NotesPath) -WorkingDirectory $GitRoot)
+    [void](Invoke-ProcessText -File $gh -CommandArgs @("release", "create", $Tag, $ZipPath, "--title", $Tag, "--notes-file", $NotesPath) -WorkingDirectory $GitRoot)
   }
 
   $assetName = Split-Path -Leaf $ZipPath
-  $assets = Invoke-Text -File $gh -CommandArgs @("release", "view", $Tag, "--json", "assets", "--jq", ".assets[].name") -WorkingDirectory $GitRoot -AllowFail
+  $assets = Invoke-ProcessText -File $gh -CommandArgs @("release", "view", $Tag, "--json", "assets", "--jq", ".assets[].name") -WorkingDirectory $GitRoot -AllowFail
   if ($assets.Code -ne 0 -or (($assets.Out -split "`r?`n") -notcontains $assetName)) {
     throw "GitHub Release 创建后未检测到发行包资产：$assetName"
   }
@@ -518,7 +492,7 @@ function Publish-ExistingTagIfNeeded([string]$Tag) {
   if (!$Tag -or !(ConfBool "PUBLISH_EXISTING_TAG_WHEN_RELEASE_MISSING" $true)) { return $false }
   if (!(ConfBool "CREATE_GITHUB_RELEASE" $true)) { return $false }
   $gh = Resolve-CommandPath "gh"
-  $view = Invoke-Text -File $gh -CommandArgs @("release", "view", $Tag) -WorkingDirectory $GitRoot -AllowFail
+  $view = Invoke-ProcessText -File $gh -CommandArgs @("release", "view", $Tag) -WorkingDirectory $GitRoot -AllowFail
   if ($view.Code -eq 0) { return $false }
 
   Write-Warn "没有新提交，但检测到最新标签 $Tag 还没有 GitHub Release，将补发该标签的发行包。"
@@ -531,8 +505,51 @@ function Publish-ExistingTagIfNeeded([string]$Tag) {
   return $true
 }
 
+function ConvertTo-RepoRelativePath([string]$Path) {
+  $full = (Resolve-Path -LiteralPath $Path).Path
+  $root = (Resolve-Path -LiteralPath $GitRoot).Path
+  if (!$full.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) { return $null }
+  $rel = $full.Substring($root.Length)
+  $rel = $rel.TrimStart([char]'\', [char]'/')
+  return ($rel -replace '\\', '/')
+}
+
+function Is-GitTracked([string]$RepoRelativePath) {
+  if (!$RepoRelativePath) { return $false }
+  $r = Invoke-Git @("ls-files", "--error-unmatch", "--", $RepoRelativePath) -AllowFail
+  return $r.Code -eq 0
+}
+
+function Is-GitIgnored([string]$RepoRelativePath) {
+  if (!$RepoRelativePath) { return $false }
+  $r = Invoke-Git @("check-ignore", "-q", "--", $RepoRelativePath) -AllowFail
+  return $r.Code -eq 0
+}
+
+function Add-ReleasePaths([string[]]$Paths) {
+  $rels = New-Object System.Collections.Generic.List[string]
+  foreach ($p in @($Paths | Select-Object -Unique)) {
+    if (!$p) { continue }
+    $rel = ConvertTo-RepoRelativePath $p
+    if (!$rel) { continue }
+    $tracked = Is-GitTracked $rel
+    $ignored = Is-GitIgnored $rel
+    if ($ignored -and -not $tracked) {
+      Write-Warn "跳过被 .gitignore 忽略的未跟踪文件：$rel"
+      continue
+    }
+    [void]$rels.Add($rel)
+  }
+  if ($rels.Count -eq 0) { return }
+  foreach ($rel in $rels) {
+    $r = Invoke-Git @("add", "--", $rel) -AllowFail
+    if ($r.Code -ne 0) { throw "git add 失败：$rel`r`n$($r.Out)" }
+    if ($r.Out.Trim()) { Write-Warn $r.Out.Trim() }
+  }
+}
+
 try {
-  Write-Info "OpenCode Pocket Kit 一键发布版本工具"
+  Write-Info "OpenCode Pocket Kit 一键发布版本工具 v12-编码与Git警告安全版"
   $GitExe = Resolve-CommandPath "git"
   $GitRoot = Resolve-GitRoot
   Write-Info "仓库目录：$GitRoot"
@@ -568,16 +585,15 @@ try {
   if ($tagExists.Code -eq 0) { throw "标签已存在：$newTag。请检查 VERSION 或先删除/处理该标签。" }
 
   if (ConfBool "AUTO_COMMIT_RELEASE_VERSION" $true) {
-    $paths = @($changedFiles | Select-Object -Unique)
-    if ($paths.Count -gt 0) {
-      [void](Add-ReleaseChangedFiles ([string[]]$paths))
+    $paths = [string[]]@($changedFiles | Select-Object -Unique)
+    if ($paths.Count -gt 0) { Add-ReleasePaths $paths }
+    $staged = Invoke-Git @("diff", "--cached", "--name-only")
+    if ($staged.Out.Trim()) {
       $prefix = Conf "COMMIT_MESSAGE_PREFIX" "release"
-      if (Test-StagedChangesExist) {
-        [void](Invoke-Git @("commit", "-m", "$prefix`: OpenCode Pocket Kit $newTag"))
-      }
-      else {
-        Write-Warn "没有需要提交的版本文件变更，跳过 release commit。"
-      }
+      [void](Invoke-Git @("commit", "-m", "$prefix`: OpenCode Pocket Kit $newTag"))
+    }
+    else {
+      Write-Warn "没有检测到已暂存的版本文件修改，跳过发布提交。"
     }
   }
   else {
@@ -595,8 +611,8 @@ try {
 
   Ensure-GhRelease $newTag $zip $notes
 
-  Write-Ok "发布完成: $newTag"
-  Write-Ok "发行包: $zip"
+  Write-Ok "发布完成：$newTag"
+  Write-Ok "发行包：$zip"
   exit 0
 }
 catch {
