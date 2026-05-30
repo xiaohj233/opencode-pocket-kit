@@ -58,16 +58,30 @@ function Resolve-CommandPath([string]$Name) {
   throw "无法解析外部命令的真实路径：$Name。"
 }
 
-function Invoke-Text([string]$File, [string[]]$Args = @(), [string]$WorkingDirectory = "", [switch]$AllowFail) {
+function Invoke-Text {
+  param(
+    [Parameter(Mandatory = $true, Position = 0)]
+    [string]$File,
+
+    [Parameter(Position = 1, ValueFromRemainingArguments = $true)]
+    [string[]]$CommandArgs,
+
+    [string]$WorkingDirectory = "",
+    [switch]$AllowFail
+  )
+
   if ([string]::IsNullOrWhiteSpace($File)) { throw "内部错误：外部命令路径为空。" }
+  if (!(Test-Path -LiteralPath $File -PathType Leaf)) { throw "外部命令不存在：$File" }
+  if ($null -eq $CommandArgs) { $CommandArgs = @() }
+
   $old = (Get-Location).Path
   try {
     if ($WorkingDirectory) { Set-Location -LiteralPath $WorkingDirectory }
-    $out = & $File @Args 2>&1
+    $out = & $File @CommandArgs 2>&1
     $code = $LASTEXITCODE
     $text = ($out | ForEach-Object { [string]$_ }) -join "`r`n"
     if ($code -ne 0 -and !$AllowFail) {
-      throw "命令执行失败：$File $($Args -join ' ')`r`n$text"
+      throw "命令执行失败：$File $($CommandArgs -join ' ')`r`n$text"
     }
     return [pscustomobject]@{ Code = $code; Out = $text }
   } finally {
@@ -109,8 +123,27 @@ function Resolve-GitRoot() {
   throw "当前目录不是 Git 仓库，也无法从脚本位置向上找到 .git。"
 }
 
-function Invoke-Git([string[]]$GitArgs, [switch]$AllowFail) {
-  return Invoke-Text $GitExe (@("-C", $GitRoot) + $GitArgs) -AllowFail:$AllowFail
+function Invoke-Git {
+  param(
+    [Parameter(Mandatory = $true, Position = 0)]
+    [string]$SubCommand,
+
+    [Parameter(Position = 1, ValueFromRemainingArguments = $true)]
+    [string[]]$GitArgs,
+
+    [switch]$AllowFail
+  )
+
+  if ([string]::IsNullOrWhiteSpace($SubCommand)) { throw "内部错误：Git 子命令为空。" }
+  if ($null -eq $GitArgs) { $GitArgs = @() }
+
+  $allArgs = New-Object System.Collections.Generic.List[string]
+  [void]$allArgs.Add("-C")
+  [void]$allArgs.Add($GitRoot)
+  [void]$allArgs.Add($SubCommand)
+  foreach ($a in $GitArgs) { [void]$allArgs.Add([string]$a) }
+
+  return Invoke-Text $GitExe @($allArgs.ToArray()) -AllowFail:$AllowFail
 }
 
 function Get-TextFileState([string]$Path) {
@@ -405,7 +438,7 @@ function Publish-ExistingTagIfNeeded([string]$Tag) {
 }
 
 try {
-  Write-Info "OpenCode Pocket Kit 一键发布版本工具 v8-递归修复版"
+  Write-Info "OpenCode Pocket Kit 一键发布版本工具 v9-Git参数修复版"
   $GitExe = Resolve-CommandPath "git"
   $GitRoot = Resolve-GitRoot
   Write-Info "仓库目录：$GitRoot"
