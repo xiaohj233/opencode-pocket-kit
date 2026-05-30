@@ -6,7 +6,7 @@ $ScriptPath = $MyInvocation.MyCommand.Path
 $ScriptDir = Split-Path -Parent $ScriptPath
 $ToolRoot = Split-Path -Parent $ScriptDir
 $ConfPath = Join-Path $ToolRoot "release.conf"
-$ToolVersion = "release-tool-v12"
+$ToolVersion = "release-tool-v13"
 
 function Write-Info([string]$Text) { Write-Host $Text -ForegroundColor Cyan }
 function Write-Ok([string]$Text) { Write-Host $Text -ForegroundColor Green }
@@ -37,6 +37,20 @@ function ConfBool([string]$Name, [bool]$Default = $false) {
   $defaultText = if ($Default) { "1" } else { "0" }
   $v = Conf $Name $defaultText
   return @("1", "true", "yes", "on", "y") -contains $v.ToLowerInvariant()
+}
+
+function Remove-GitLineEndingWarnings([string]$Text) {
+  if ([string]::IsNullOrWhiteSpace($Text)) { return "" }
+  if (!(ConfBool "SUPPRESS_GIT_LINE_ENDING_WARNINGS" $true)) { return $Text.Trim() }
+
+  $kept = New-Object System.Collections.Generic.List[string]
+  foreach ($line in ($Text -split "`r?`n")) {
+    $t = $line.Trim()
+    if ($t -eq "") { continue }
+    if ($t -match "^warning: in the working copy of '.+', (CRLF|LF) will be replaced by (LF|CRLF) the next time Git touches it$") { continue }
+    [void]$kept.Add($line)
+  }
+  return (($kept.ToArray()) -join "`r`n").Trim()
 }
 
 function Resolve-CommandPath([string]$Name) {
@@ -543,13 +557,14 @@ function Add-ReleasePaths([string[]]$Paths) {
   if ($rels.Count -eq 0) { return }
   foreach ($rel in $rels) {
     $r = Invoke-Git @("add", "--", $rel) -AllowFail
-    if ($r.Code -ne 0) { throw "git add 失败：$rel`r`n$($r.Out)" }
-    if ($r.Out.Trim()) { Write-Warn $r.Out.Trim() }
+    $filteredOut = Remove-GitLineEndingWarnings $r.Out
+    if ($r.Code -ne 0) { throw "git add 失败：$rel`r`n$filteredOut" }
+    if ($filteredOut) { Write-Warn $filteredOut }
   }
 }
 
 try {
-  Write-Info "OpenCode Pocket Kit 一键发布版本工具 v12-编码与Git警告安全版"
+  Write-Info "OpenCode Pocket Kit 一键发布版本工具"
   $GitExe = Resolve-CommandPath "git"
   $GitRoot = Resolve-GitRoot
   Write-Info "仓库目录：$GitRoot"
