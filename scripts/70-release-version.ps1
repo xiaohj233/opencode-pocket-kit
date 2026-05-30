@@ -43,7 +43,7 @@ function Resolve-CommandPath([string]$Name) {
   # 必须解析到外部可执行文件，不能返回裸命令名。
   # PowerShell 命令名大小写不敏感，如果脚本里有 Invoke-Git/Git 之类函数，
   # 裸命令名可能被解析到函数，从而造成递归调用和“调用深度溢出”。
-  $cmd = Get-Command $Name -CommandType Application,ExternalScript -ErrorAction SilentlyContinue | Select-Object -First 1
+  $cmd = Get-Command $Name -CommandType Application, ExternalScript -ErrorAction SilentlyContinue | Select-Object -First 1
   if (!$cmd) { throw "未找到外部命令：$Name。请确认它已经安装并加入 PATH。" }
 
   foreach ($prop in @("Path", "Source", "Definition")) {
@@ -52,19 +52,36 @@ function Resolve-CommandPath([string]$Name) {
       if (![string]::IsNullOrWhiteSpace($value) -and (Test-Path -LiteralPath $value -PathType Leaf)) {
         return (Resolve-Path -LiteralPath $value).Path
       }
-    } catch {}
+    }
+    catch {}
   }
 
   throw "无法解析外部命令的真实路径：$Name。"
 }
 
+function Normalize-ArgList([object[]]$Items) {
+  $list = New-Object System.Collections.Generic.List[string]
+  if ($null -eq $Items) { return [string[]]@() }
+  foreach ($item in $Items) {
+    if ($null -eq $item) { continue }
+    if (($item -is [System.Array]) -and -not ($item -is [string])) {
+      foreach ($sub in $item) {
+        if ($null -ne $sub) { [void]$list.Add([string]$sub) }
+      }
+    }
+    else {
+      [void]$list.Add([string]$item)
+    }
+  }
+  return [string[]]$list.ToArray()
+}
+
 function Invoke-Text {
   param(
-    [Parameter(Mandatory = $true, Position = 0)]
+    [Parameter(Mandatory = $true)]
     [string]$File,
 
-    [Parameter(Position = 1, ValueFromRemainingArguments = $true)]
-    [string[]]$CommandArgs,
+    [object[]]$CommandArgs = @(),
 
     [string]$WorkingDirectory = "",
     [switch]$AllowFail
@@ -72,19 +89,21 @@ function Invoke-Text {
 
   if ([string]::IsNullOrWhiteSpace($File)) { throw "内部错误：外部命令路径为空。" }
   if (!(Test-Path -LiteralPath $File -PathType Leaf)) { throw "外部命令不存在：$File" }
-  if ($null -eq $CommandArgs) { $CommandArgs = @() }
+
+  $normalizedArgs = Normalize-ArgList $CommandArgs
 
   $old = (Get-Location).Path
   try {
     if ($WorkingDirectory) { Set-Location -LiteralPath $WorkingDirectory }
-    $out = & $File @CommandArgs 2>&1
+    $out = & $File @normalizedArgs 2>&1
     $code = $LASTEXITCODE
     $text = ($out | ForEach-Object { [string]$_ }) -join "`r`n"
     if ($code -ne 0 -and !$AllowFail) {
-      throw "命令执行失败：$File $($CommandArgs -join ' ')`r`n$text"
+      throw "命令执行失败：$File $($normalizedArgs -join ' ')`r`n$text"
     }
     return [pscustomobject]@{ Code = $code; Out = $text }
-  } finally {
+  }
+  finally {
     Set-Location -LiteralPath $old
   }
 }
@@ -107,7 +126,7 @@ function Resolve-GitRoot() {
   foreach ($candidate in $candidates) {
     $c = Sanitize-PathText $candidate
     if (!$c -or !(Test-Path -LiteralPath $c)) { continue }
-    $r = Invoke-Text $GitExe @("-C", $c, "rev-parse", "--show-toplevel") -AllowFail
+    $r = Invoke-Text -File $GitExe -CommandArgs @("-C", $c, "rev-parse", "--show-toplevel") -AllowFail
     if ($r.Code -eq 0 -and $r.Out.Trim()) {
       return (Resolve-Path -LiteralPath (Sanitize-PathText $r.Out)).Path
     }
@@ -125,25 +144,23 @@ function Resolve-GitRoot() {
 
 function Invoke-Git {
   param(
-    [Parameter(Mandatory = $true, Position = 0)]
-    [string]$SubCommand,
-
-    [Parameter(Position = 1, ValueFromRemainingArguments = $true)]
-    [string[]]$GitArgs,
+    [Parameter(Position = 0, ValueFromRemainingArguments = $true)]
+    [object[]]$GitArgs,
 
     [switch]$AllowFail
   )
 
-  if ([string]::IsNullOrWhiteSpace($SubCommand)) { throw "内部错误：Git 子命令为空。" }
-  if ($null -eq $GitArgs) { $GitArgs = @() }
+  $normalizedGitArgs = Normalize-ArgList $GitArgs
+  if ($normalizedGitArgs.Count -lt 1 -or [string]::IsNullOrWhiteSpace($normalizedGitArgs[0])) {
+    throw "内部错误：Git 参数为空。"
+  }
 
   $allArgs = New-Object System.Collections.Generic.List[string]
   [void]$allArgs.Add("-C")
   [void]$allArgs.Add($GitRoot)
-  [void]$allArgs.Add($SubCommand)
-  foreach ($a in $GitArgs) { [void]$allArgs.Add([string]$a) }
+  foreach ($a in $normalizedGitArgs) { [void]$allArgs.Add([string]$a) }
 
-  return Invoke-Text $GitExe @($allArgs.ToArray()) -AllowFail:$AllowFail
+  return Invoke-Text -File $GitExe -CommandArgs ([string[]]$allArgs.ToArray()) -AllowFail:$AllowFail
 }
 
 function Get-TextFileState([string]$Path) {
@@ -158,12 +175,14 @@ function Get-TextFileState([string]$Path) {
     $encodingName = "utf8-bom"
     $encoding = [System.Text.UTF8Encoding]::new($false, $true)
     $offset = 3
-  } elseif ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) {
+  }
+  elseif ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) {
     $hasBom = $true
     $encodingName = "utf16le-bom"
     $encoding = [System.Text.UnicodeEncoding]::new($false, $true, $true)
     $offset = 2
-  } elseif ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFE -and $bytes[1] -eq 0xFF) {
+  }
+  elseif ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFE -and $bytes[1] -eq 0xFF) {
     $hasBom = $true
     $encodingName = "utf16be-bom"
     $encoding = [System.Text.UnicodeEncoding]::new($true, $true, $true)
@@ -172,12 +191,12 @@ function Get-TextFileState([string]$Path) {
 
   $text = if ($bytes.Length -gt $offset) { $encoding.GetString($bytes, $offset, $bytes.Length - $offset) } else { "" }
   return [pscustomobject]@{
-    Path = $Path
-    Bytes = $bytes
-    Text = $text
-    Encoding = $encoding
+    Path         = $Path
+    Bytes        = $bytes
+    Text         = $text
+    Encoding     = $encoding
     EncodingName = $encodingName
-    HasBom = $hasBom
+    HasBom       = $hasBom
   }
 }
 
@@ -189,7 +208,8 @@ function Write-TextPreserveEncoding($State, [string]$Text) {
     elseif ($State.EncodingName -eq "utf16be-bom") { $prefix = [byte[]](0xFE, 0xFF) }
     else { $prefix = [byte[]]@() }
     [System.IO.File]::WriteAllBytes($State.Path, [byte[]]($prefix + $body))
-  } else {
+  }
+  else {
     [System.IO.File]::WriteAllBytes($State.Path, [byte[]]$body)
   }
 }
@@ -235,7 +255,8 @@ function Set-VersionFile([string]$Path, [string]$New) {
     $state = Get-TextFileState $Path
     $nl = if ($state.Text.Contains("`r`n")) { "`r`n" } elseif ($state.Text.Contains("`n")) { "`n" } else { "`r`n" }
     Write-TextPreserveEncoding $state ($New + $nl)
-  } else {
+  }
+  else {
     Write-Utf8NoBom $Path ($New + "`r`n")
   }
 }
@@ -296,7 +317,8 @@ function Ensure-GitIgnoreReleaseRules() {
       return @($gi)
     }
     return @()
-  } else {
+  }
+  else {
     Write-Utf8NoBom $gi (($rules -join "`r`n") + "`r`n")
     return @($gi)
   }
@@ -307,10 +329,10 @@ function Remove-TrackedReleaseZips() {
   if (!(ConfBool "REMOVE_TRACKED_RELEASE_ZIPS" $true)) { return @() }
   $ls = Invoke-Git @("ls-files")
   $files = @($ls.Out -split "`r?`n" | Where-Object {
-    $_ -match '^opencode-pocket-kit-v\d+\.\d+\.\d+\.zip$' -or
-    $_ -match '^\.release/' -or
-    $_ -match '^release-output/'
-  })
+      $_ -match '^opencode-pocket-kit-v\d+\.\d+\.\d+\.zip$' -or
+      $_ -match '^\.release/' -or
+      $_ -match '^release-output/'
+    })
   if ($files.Count -gt 0) {
     Write-Warn "检测到发行 zip 或发行输出目录被 Git 跟踪，将从仓库中移除这些构建产物。"
     foreach ($f in $files) {
@@ -378,7 +400,8 @@ function Build-ReleaseNotes([string]$OldTag, [string]$NewTag, [string]$UpperRef)
     $log = Invoke-Git @("log", $range, "--pretty=format:- %s (%h)") -AllowFail
     if ($log.Code -eq 0 -and $log.Out.Trim()) {
       foreach ($l in ($log.Out -split "`r?`n")) { [void]$lines.Add($l) }
-    } else {
+    }
+    else {
       [void]$lines.Add("- 首次发布")
     }
   }
@@ -401,19 +424,20 @@ function Create-ReleaseZip([string]$Version, [string]$Ref) {
 function Ensure-GhRelease([string]$Tag, [string]$ZipPath, [string]$NotesPath) {
   if (!(ConfBool "CREATE_GITHUB_RELEASE" $true)) { return }
   $gh = Resolve-CommandPath "gh"
-  $status = Invoke-Text $gh @("auth", "status") -WorkingDirectory $GitRoot -AllowFail
+  $status = Invoke-Text -File $gh -CommandArgs @("auth", "status") -WorkingDirectory $GitRoot -AllowFail
   if ($status.Code -ne 0) { throw "GitHub CLI 未登录。请先运行：gh auth login" }
 
-  $view = Invoke-Text $gh @("release", "view", $Tag) -WorkingDirectory $GitRoot -AllowFail
+  $view = Invoke-Text -File $gh -CommandArgs @("release", "view", $Tag) -WorkingDirectory $GitRoot -AllowFail
   if ($view.Code -eq 0) {
     Write-Warn "GitHub Release 已存在，将覆盖上传发行包资产：$Tag"
-    [void](Invoke-Text $gh @("release", "upload", $Tag, $ZipPath, "--clobber") -WorkingDirectory $GitRoot)
-  } else {
-    [void](Invoke-Text $gh @("release", "create", $Tag, $ZipPath, "--title", $Tag, "--notes-file", $NotesPath) -WorkingDirectory $GitRoot)
+    [void](Invoke-Text -File $gh -CommandArgs @("release", "upload", $Tag, $ZipPath, "--clobber") -WorkingDirectory $GitRoot)
+  }
+  else {
+    [void](Invoke-Text -File $gh -CommandArgs @("release", "create", $Tag, $ZipPath, "--title", $Tag, "--notes-file", $NotesPath) -WorkingDirectory $GitRoot)
   }
 
   $assetName = Split-Path -Leaf $ZipPath
-  $assets = Invoke-Text $gh @("release", "view", $Tag, "--json", "assets", "--jq", ".assets[].name") -WorkingDirectory $GitRoot -AllowFail
+  $assets = Invoke-Text -File $gh -CommandArgs @("release", "view", $Tag, "--json", "assets", "--jq", ".assets[].name") -WorkingDirectory $GitRoot -AllowFail
   if ($assets.Code -ne 0 -or (($assets.Out -split "`r?`n") -notcontains $assetName)) {
     throw "GitHub Release 创建后未检测到发行包资产：$assetName"
   }
@@ -424,7 +448,7 @@ function Publish-ExistingTagIfNeeded([string]$Tag) {
   if (!$Tag -or !(ConfBool "PUBLISH_EXISTING_TAG_WHEN_RELEASE_MISSING" $true)) { return $false }
   if (!(ConfBool "CREATE_GITHUB_RELEASE" $true)) { return $false }
   $gh = Resolve-CommandPath "gh"
-  $view = Invoke-Text $gh @("release", "view", $Tag) -WorkingDirectory $GitRoot -AllowFail
+  $view = Invoke-Text -File $gh -CommandArgs @("release", "view", $Tag) -WorkingDirectory $GitRoot -AllowFail
   if ($view.Code -eq 0) { return $false }
 
   Write-Warn "没有新提交，但检测到最新标签 $Tag 还没有 GitHub Release，将补发该标签的发行包。"
@@ -438,7 +462,7 @@ function Publish-ExistingTagIfNeeded([string]$Tag) {
 }
 
 try {
-  Write-Info "OpenCode Pocket Kit 一键发布版本工具 v9-Git参数修复版"
+  Write-Info "OpenCode Pocket Kit 一键发布版本工具"
   $GitExe = Resolve-CommandPath "git"
   $GitRoot = Resolve-GitRoot
   Write-Info "仓库目录：$GitRoot"
@@ -480,7 +504,8 @@ try {
       $prefix = Conf "COMMIT_MESSAGE_PREFIX" "release"
       [void](Invoke-Git @("commit", "-m", "$prefix`: OpenCode Pocket Kit $newTag"))
     }
-  } else {
+  }
+  else {
     throw "版本号文件已修改，但配置禁止自动提交。请启用 AUTO_COMMIT_RELEASE_VERSION 或手动处理。"
   }
 
@@ -498,7 +523,8 @@ try {
   Write-Ok "发布完成：$newTag"
   Write-Ok "发行包：$zip"
   exit 0
-} catch {
+}
+catch {
   Write-Err $_.Exception.Message
   exit 1
 }
