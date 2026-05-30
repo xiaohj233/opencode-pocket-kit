@@ -25,6 +25,7 @@
 !/repo-cache/.keep
 /publish-github.ps1
 /dist/
+/release/
 
 # User data
 /projects/*
