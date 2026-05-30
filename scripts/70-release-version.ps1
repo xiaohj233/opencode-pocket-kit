@@ -163,6 +163,76 @@ function Invoke-Git {
   return Invoke-Text -File $GitExe -CommandArgs ([string[]]$allArgs.ToArray()) -AllowFail:$AllowFail
 }
 
+function Get-GitRelativePath([string]$Path) {
+  if ([string]::IsNullOrWhiteSpace($Path)) { return $null }
+
+  $p = Sanitize-PathText $Path
+  if ([string]::IsNullOrWhiteSpace($p)) { return $null }
+
+  # git add 对绝对路径、中文路径、忽略规则叠加时更容易出现难懂报错。
+  # 这里统一转换成相对仓库根目录的路径，并使用正斜杠，交给 git 处理。
+  if (![IO.Path]::IsPathRooted($p)) {
+    $candidate = Join-Path $GitRoot $p
+  }
+  else {
+    $candidate = $p
+  }
+
+  $full = [IO.Path]::GetFullPath($candidate)
+  $rootFull = [IO.Path]::GetFullPath($GitRoot)
+  if (!$rootFull.EndsWith([IO.Path]::DirectorySeparatorChar)) { $rootFull += [IO.Path]::DirectorySeparatorChar }
+
+  if (!$full.StartsWith($rootFull, [StringComparison]::OrdinalIgnoreCase)) {
+    Write-Warn "跳过仓库外路径：$Path"
+    return $null
+  }
+
+  $rel = $full.Substring($rootFull.Length)
+  return ($rel -replace '\\', '/')
+}
+
+function Test-GitPathIgnored([string]$RelativePath) {
+  if ([string]::IsNullOrWhiteSpace($RelativePath)) { return $false }
+
+  # 已被 Git 跟踪的文件即使匹配 .gitignore，也应该允许 git add 更新。
+  $tracked = Invoke-Git @("ls-files", "--error-unmatch", "--", $RelativePath) -AllowFail
+  if ($tracked.Code -eq 0) { return $false }
+
+  $ignored = Invoke-Git @("check-ignore", "-q", "--", $RelativePath) -AllowFail
+  return ($ignored.Code -eq 0)
+}
+
+function Add-ReleaseChangedFiles([string[]]$Paths) {
+  $added = 0
+  $unique = @($Paths | Where-Object { $_ } | Select-Object -Unique)
+
+  foreach ($p in $unique) {
+    $rel = Get-GitRelativePath $p
+    if (!$rel) { continue }
+
+    # 删除操作已经由 git rm 处理过，这里不再 git add 一个不存在的路径。
+    $full = Join-Path $GitRoot ($rel -replace '/', [IO.Path]::DirectorySeparatorChar)
+    if (!(Test-Path -LiteralPath $full)) {
+      continue
+    }
+
+    if (Test-GitPathIgnored $rel) {
+      Write-Warn "跳过被 .gitignore 忽略的未跟踪路径：$rel"
+      continue
+    }
+
+    [void](Invoke-Git @("add", "--", $rel))
+    $added++
+  }
+
+  return $added
+}
+
+function Test-StagedChangesExist() {
+  $r = Invoke-Git @("diff", "--cached", "--quiet") -AllowFail
+  return ($r.Code -ne 0)
+}
+
 function Get-TextFileState([string]$Path) {
   $bytes = [System.IO.File]::ReadAllBytes($Path)
   $hasBom = $false
@@ -500,9 +570,14 @@ try {
   if (ConfBool "AUTO_COMMIT_RELEASE_VERSION" $true) {
     $paths = @($changedFiles | Select-Object -Unique)
     if ($paths.Count -gt 0) {
-      foreach ($p in $paths) { [void](Invoke-Git @("add", "--", $p)) }
+      [void](Add-ReleaseChangedFiles ([string[]]$paths))
       $prefix = Conf "COMMIT_MESSAGE_PREFIX" "release"
-      [void](Invoke-Git @("commit", "-m", "$prefix`: OpenCode Pocket Kit $newTag"))
+      if (Test-StagedChangesExist) {
+        [void](Invoke-Git @("commit", "-m", "$prefix`: OpenCode Pocket Kit $newTag"))
+      }
+      else {
+        Write-Warn "没有需要提交的版本文件变更，跳过 release commit。"
+      }
     }
   }
   else {
@@ -520,8 +595,8 @@ try {
 
   Ensure-GhRelease $newTag $zip $notes
 
-  Write-Ok "发布完成：$newTag"
-  Write-Ok "发行包：$zip"
+  Write-Ok "发布完成: $newTag"
+  Write-Ok "发行包: $zip"
   exit 0
 }
 catch {
