@@ -40,8 +40,12 @@ function ConfBool([string]$Name, [bool]$Default = $false) {
 }
 
 function Resolve-CommandPath([string]$Name) {
-  $cmd = Get-Command $Name -ErrorAction SilentlyContinue
-  if (!$cmd) { throw "未找到命令：$Name。请确认它已经安装并加入 PATH。" }
+  # 必须解析到外部可执行文件，不能返回裸命令名。
+  # PowerShell 命令名大小写不敏感，如果脚本里有 Invoke-Git/Git 之类函数，
+  # 裸命令名可能被解析到函数，从而造成递归调用和“调用深度溢出”。
+  $cmd = Get-Command $Name -CommandType Application,ExternalScript -ErrorAction SilentlyContinue | Select-Object -First 1
+  if (!$cmd) { throw "未找到外部命令：$Name。请确认它已经安装并加入 PATH。" }
+
   foreach ($prop in @("Path", "Source", "Definition")) {
     try {
       $value = [string]$cmd.$prop
@@ -50,7 +54,8 @@ function Resolve-CommandPath([string]$Name) {
       }
     } catch {}
   }
-  return $Name
+
+  throw "无法解析外部命令的真实路径：$Name。"
 }
 
 function Invoke-Text([string]$File, [string[]]$Args = @(), [string]$WorkingDirectory = "", [switch]$AllowFail) {
@@ -104,7 +109,7 @@ function Resolve-GitRoot() {
   throw "当前目录不是 Git 仓库，也无法从脚本位置向上找到 .git。"
 }
 
-function Git([string[]]$GitArgs, [switch]$AllowFail) {
+function Invoke-Git([string[]]$GitArgs, [switch]$AllowFail) {
   return Invoke-Text $GitExe (@("-C", $GitRoot) + $GitArgs) -AllowFail:$AllowFail
 }
 
@@ -267,7 +272,7 @@ function Ensure-GitIgnoreReleaseRules() {
 function Remove-TrackedReleaseZips() {
   $removed = New-Object System.Collections.Generic.List[string]
   if (!(ConfBool "REMOVE_TRACKED_RELEASE_ZIPS" $true)) { return @() }
-  $ls = Git @("ls-files")
+  $ls = Invoke-Git @("ls-files")
   $files = @($ls.Out -split "`r?`n" | Where-Object {
     $_ -match '^opencode-pocket-kit-v\d+\.\d+\.\d+\.zip$' -or
     $_ -match '^\.release/' -or
@@ -276,7 +281,7 @@ function Remove-TrackedReleaseZips() {
   if ($files.Count -gt 0) {
     Write-Warn "检测到发行 zip 或发行输出目录被 Git 跟踪，将从仓库中移除这些构建产物。"
     foreach ($f in $files) {
-      [void](Git @("rm", "-f", "--", $f) -AllowFail)
+      [void](Invoke-Git @("rm", "-f", "--", $f) -AllowFail)
       [void]$removed.Add($f)
     }
   }
@@ -284,25 +289,25 @@ function Remove-TrackedReleaseZips() {
 }
 
 function Has-WorkingTreeChanges() {
-  $s = Git @("status", "--porcelain")
+  $s = Invoke-Git @("status", "--porcelain")
   return -not [string]::IsNullOrWhiteSpace($s.Out)
 }
 
 function Require-CleanWorkingTree() {
-  $s = Git @("status", "--porcelain")
+  $s = Invoke-Git @("status", "--porcelain")
   if (![string]::IsNullOrWhiteSpace($s.Out)) {
     throw "工作区存在未提交更改。请先提交或暂存当前修改，再运行发布脚本。这样可以避免发布脚本把非发布文件一起提交。`r`n$s"
   }
 }
 
 function Get-LatestVersionTag() {
-  $r = Git @("tag", "--list", "v*.*.*", "--sort=-v:refname") -AllowFail
+  $r = Invoke-Git @("tag", "--list", "v*.*.*", "--sort=-v:refname") -AllowFail
   if ($r.Code -ne 0) { return $null }
   return @($r.Out -split "`r?`n" | Where-Object { $_ -match '^v\d+\.\d+\.\d+$' } | Select-Object -First 1)[0]
 }
 
 function Get-PreviousVersionTag([string]$Tag) {
-  $r = Git @("tag", "--list", "v*.*.*", "--sort=-v:refname") -AllowFail
+  $r = Invoke-Git @("tag", "--list", "v*.*.*", "--sort=-v:refname") -AllowFail
   if ($r.Code -ne 0) { return $null }
   $tags = @($r.Out -split "`r?`n" | Where-Object { $_ -match '^v\d+\.\d+\.\d+$' })
   for ($i = 0; $i -lt $tags.Count; $i++) {
@@ -313,7 +318,7 @@ function Get-PreviousVersionTag([string]$Tag) {
 
 function Has-NewCommitSinceTag([string]$Tag) {
   if (!$Tag) { return $true }
-  $r = Git @("rev-list", "$Tag..HEAD", "--count") -AllowFail
+  $r = Invoke-Git @("rev-list", "$Tag..HEAD", "--count") -AllowFail
   if ($r.Code -ne 0) { return $true }
   $countText = ($r.Out).Trim()
   if (!$countText) { return $false }
@@ -337,7 +342,7 @@ function Build-ReleaseNotes([string]$OldTag, [string]$NewTag, [string]$UpperRef)
   if ($mode -eq "git" -or $mode -eq "both") {
     [void]$lines.Add("## Git 提交记录")
     $range = if ($OldTag) { "$OldTag..$UpperRef" } else { $UpperRef }
-    $log = Git @("log", $range, "--pretty=format:- %s (%h)") -AllowFail
+    $log = Invoke-Git @("log", $range, "--pretty=format:- %s (%h)") -AllowFail
     if ($log.Code -eq 0 -and $log.Out.Trim()) {
       foreach ($l in ($log.Out -split "`r?`n")) { [void]$lines.Add($l) }
     } else {
@@ -355,7 +360,7 @@ function Create-ReleaseZip([string]$Version, [string]$Ref) {
   $packageName = Conf "PACKAGE_NAME" "opencode-pocket-kit"
   $zip = Join-Path $ReleaseDir "$packageName-v$Version.zip"
   if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
-  [void](Git @("archive", "--format=zip", "--output", $zip, "--prefix", "$packageName/", $Ref))
+  [void](Invoke-Git @("archive", "--format=zip", "--output", $zip, "--prefix", "$packageName/", $Ref))
   if (!(Test-Path -LiteralPath $zip)) { throw "发行包生成失败：$zip" }
   return $zip
 }
@@ -400,7 +405,7 @@ function Publish-ExistingTagIfNeeded([string]$Tag) {
 }
 
 try {
-  Write-Info "OpenCode Pocket Kit 一键发布版本工具"
+  Write-Info "OpenCode Pocket Kit 一键发布版本工具 v8-递归修复版"
   $GitExe = Resolve-CommandPath "git"
   $GitRoot = Resolve-GitRoot
   Write-Info "仓库目录：$GitRoot"
@@ -432,27 +437,27 @@ try {
   foreach ($f in (Ensure-GitIgnoreReleaseRules)) { [void]$changedFiles.Add($f) }
   foreach ($f in (Remove-TrackedReleaseZips)) { [void]$changedFiles.Add($f) }
 
-  $tagExists = Git @("rev-parse", "-q", "--verify", "refs/tags/$newTag") -AllowFail
+  $tagExists = Invoke-Git @("rev-parse", "-q", "--verify", "refs/tags/$newTag") -AllowFail
   if ($tagExists.Code -eq 0) { throw "标签已存在：$newTag。请检查 VERSION 或先删除/处理该标签。" }
 
   if (ConfBool "AUTO_COMMIT_RELEASE_VERSION" $true) {
     $paths = @($changedFiles | Select-Object -Unique)
     if ($paths.Count -gt 0) {
-      foreach ($p in $paths) { [void](Git @("add", "--", $p)) }
+      foreach ($p in $paths) { [void](Invoke-Git @("add", "--", $p)) }
       $prefix = Conf "COMMIT_MESSAGE_PREFIX" "release"
-      [void](Git @("commit", "-m", "$prefix`: OpenCode Pocket Kit $newTag"))
+      [void](Invoke-Git @("commit", "-m", "$prefix`: OpenCode Pocket Kit $newTag"))
     }
   } else {
     throw "版本号文件已修改，但配置禁止自动提交。请启用 AUTO_COMMIT_RELEASE_VERSION 或手动处理。"
   }
 
-  [void](Git @("tag", "-a", $newTag, "-m", "OpenCode Pocket Kit $newTag"))
+  [void](Invoke-Git @("tag", "-a", $newTag, "-m", "OpenCode Pocket Kit $newTag"))
   $zip = Create-ReleaseZip $newVersion $newTag
 
   if (ConfBool "AUTO_PUSH" $true) {
-    $branch = (Git @("branch", "--show-current")).Out.Trim()
-    if ($branch) { [void](Git @("push", "origin", $branch)) }
-    [void](Git @("push", "origin", $newTag))
+    $branch = (Invoke-Git @("branch", "--show-current")).Out.Trim()
+    if ($branch) { [void](Invoke-Git @("push", "origin", $branch)) }
+    [void](Invoke-Git @("push", "origin", $newTag))
   }
 
   Ensure-GhRelease $newTag $zip $notes
