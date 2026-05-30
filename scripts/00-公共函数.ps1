@@ -1,6 +1,6 @@
 
 $ErrorActionPreference = "Stop"
-$script:PortableVersion = "V1.0.7"
+$script:PortableVersion = "V1.0.8"
 $script:ProductName = "OpenCode Pocket Kit"
 $script:PortableRoot = Split-Path -Parent $PSScriptRoot
 $script:BinDir = Join-Path $script:PortableRoot "bin"

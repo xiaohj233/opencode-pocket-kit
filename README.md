@@ -2,7 +2,7 @@
 
 <div align="center">
 
-![Version](https://img.shields.io/badge/version-1.0.7-blue.svg)
+![Version](https://img.shields.io/badge/version-1.0.8-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-Windows-0078D4.svg)
 ![PowerShell](https://img.shields.io/badge/powershell-5.1+-5391FE.svg)
 ![OpenCode](https://img.shields.io/badge/OpenCode-portable-111827.svg)

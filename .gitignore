@@ -48,3 +48,5 @@ Thumbs.db
 /release-output/
 /opencode-pocket-kit-v*.zip
 /*.release.zip
+.release/
+*.release.zip
