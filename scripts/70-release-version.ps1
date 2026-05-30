@@ -1,6 +1,6 @@
 ﻿
 $ErrorActionPreference = "Stop"
-$ScriptVersion = "v14-working-tree-zip-encoding-safe"
+$ScriptVersion = "release"
 
 function Write-Info([string]$Message) { Write-Host $Message -ForegroundColor Cyan }
 function Write-Ok([string]$Message) { Write-Host $Message -ForegroundColor Green }
@@ -264,9 +264,67 @@ function Get-CommitNotes([string]$SinceTag) {
   return '本次发布包含最新提交。'
 }
 
+function Get-GitHubRepoSlug {
+  $remote = (Invoke-External -FilePath $Global:GitExe -ArgumentList @('-C', $Global:GitRoot, 'remote', 'get-url', 'origin') -AllowFailure -Quiet).Stdout.Trim()
+  if (!$remote) { return '' }
+  if ($remote -match 'github\.com[:/](?<owner>[^/]+)/(?<repo>[^/.]+)(\.git)?$') {
+    return ($Matches['owner'] + '/' + $Matches['repo'])
+  }
+  return ''
+}
+
+function Get-GhBaseArgs {
+  if ($Global:RepoSlug) { return @('--repo', $Global:RepoSlug) }
+  return @()
+}
+
 function Test-GhReleaseExists([string]$Tag) {
-  $r = Invoke-External -FilePath $Global:GhExe -ArgumentList @('release', 'view', $Tag) -AllowFailure -Quiet
+  $args = @('release', 'view', $Tag) + (Get-GhBaseArgs)
+  $r = Invoke-External -FilePath $Global:GhExe -ArgumentList $args -AllowFailure -Quiet
   return ($r.ExitCode -eq 0)
+}
+
+function Ensure-GhReleaseAndAsset {
+  param(
+    [Parameter(Mandatory=$true)][string]$Tag,
+    [Parameter(Mandatory=$true)][string]$Title,
+    [Parameter(Mandatory=$true)][string]$ZipPath,
+    [Parameter(Mandatory=$true)][string]$ZipName,
+    [Parameter(Mandatory=$true)][string]$NotesPath
+  )
+
+  $base = Get-GhBaseArgs
+
+  if (Test-GhReleaseExists $Tag) {
+    Write-Host "GitHub Release 已存在，准备更新说明并上传资产：$Tag"
+    [void](Invoke-External -FilePath $Global:GhExe -ArgumentList (@('release', 'edit', $Tag, '--notes-file', $NotesPath) + $base) -AllowFailure -Quiet)
+  } else {
+    Write-Host "GitHub Release 不存在，正在创建：$Tag"
+    # 先创建 Release，不在 create 阶段上传资产；随后统一 upload，避免 create 参数差异导致资产丢失。
+    [void](Invoke-External -FilePath $Global:GhExe -ArgumentList (@('release', 'create', $Tag, '--title', $Title, '--notes-file', $NotesPath, '--verify-tag') + $base))
+  }
+
+  Write-Host "正在上传发行包资产：$ZipName"
+  [void](Invoke-External -FilePath $Global:GhExe -ArgumentList (@('release', 'upload', $Tag, $ZipPath, '--clobber') + $base))
+
+  $assetArgs = @('release', 'view', $Tag, '--json', 'assets', '--jq', '.assets[].name') + $base
+  $assetList = (Invoke-External -FilePath $Global:GhExe -ArgumentList $assetArgs -Quiet).Stdout
+  if ($assetList -notmatch [regex]::Escape($ZipName)) {
+    Write-Warn "第一次校验未看到发行包资产，正在重试上传。"
+    [void](Invoke-External -FilePath $Global:GhExe -ArgumentList (@('release', 'upload', $Tag, $ZipPath, '--clobber') + $base))
+    $assetList = (Invoke-External -FilePath $Global:GhExe -ArgumentList $assetArgs -Quiet).Stdout
+  }
+
+  if ($assetList -match [regex]::Escape($ZipName)) {
+    Write-Ok "GitHub Release 已包含发行包资产：$ZipName"
+  } else {
+    throw "GitHub Release 中没有找到发行包资产：$ZipName"
+  }
+
+  $urlResult = Invoke-External -FilePath $Global:GhExe -ArgumentList (@('release', 'view', $Tag, '--json', 'url', '--jq', '.url') + $base) -AllowFailure -Quiet
+  if ($urlResult.ExitCode -eq 0 -and $urlResult.Stdout.Trim()) {
+    Write-Host "Release 页面：$($urlResult.Stdout.Trim())"
+  }
 }
 
 try {
@@ -278,6 +336,9 @@ try {
   $rootResult = Invoke-External -FilePath $Global:GitExe -ArgumentList @('-C', $candidate, 'rev-parse', '--show-toplevel') -Quiet
   $Global:GitRoot = [IO.Path]::GetFullPath($rootResult.Stdout.Trim())
   Write-Host "仓库目录：$Global:GitRoot"
+  $Global:RepoSlug = Get-GitHubRepoSlug
+  if ($Global:RepoSlug) { Write-Host "GitHub 仓库：$Global:RepoSlug" }
+  else { Write-Warn "未能从 origin 解析 GitHub 仓库名，将使用 gh 当前仓库上下文。" }
 
   $confPath = Join-Path $Global:GitRoot 'release.conf'
   $conf = Read-Conf $confPath
@@ -352,19 +413,7 @@ try {
   $notes = "# $projectName $tag`n`n" + (Get-CommitNotes $latestTag) + "`n"
   [IO.File]::WriteAllText($notesPath, $notes, (New-Object Text.UTF8Encoding($false)))
 
-  if (Test-GhReleaseExists $tag) {
-    [void](Invoke-External -FilePath $Global:GhExe -ArgumentList @('release', 'upload', $tag, $zipPath, '--clobber'))
-    [void](Invoke-External -FilePath $Global:GhExe -ArgumentList @('release', 'edit', $tag, '--notes-file', $notesPath) -AllowFailure -Quiet)
-  } else {
-    [void](Invoke-External -FilePath $Global:GhExe -ArgumentList @('release', 'create', $tag, $zipPath, '--title', $tag, '--notes-file', $notesPath))
-  }
-
-  $assetList = (Invoke-External -FilePath $Global:GhExe -ArgumentList @('release', 'view', $tag, '--json', 'assets', '--jq', '.assets[].name') -Quiet).Stdout
-  if ($assetList -match [regex]::Escape($zipName)) {
-    Write-Ok "GitHub Release 已包含发行包资产：$zipName"
-  } else {
-    throw "GitHub Release 中没有找到发行包资产：$zipName"
-  }
+  Ensure-GhReleaseAndAsset -Tag $tag -Title $tag -ZipPath $zipPath -ZipName $zipName -NotesPath $notesPath
 
   Write-Ok "发布完成：$tag"
   Write-Host "发行包：$zipPath"
