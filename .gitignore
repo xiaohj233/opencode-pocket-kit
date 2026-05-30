@@ -1,0 +1,44 @@
+# Runtime logs and caches
+/logs/*
+!/logs/.keep
+/cache/*
+!/cache/.keep
+/.portable-state/*
+!/.portable-state/.keep
+
+# Secrets
+/vault/secrets.env.enc
+/vault/*.bak
+!/vault/.keep
+!/vault/secrets.example.env
+
+# Installed binaries and npm packages
+/bin/opencode.exe
+/bin/opencode.cmd
+/npm-global/*
+!/npm-global/.keep
+/config/opencode/node_modules/*
+!/config/opencode/node_modules/.keep
+
+# Git sparse caches
+/repo-cache/*
+!/repo-cache/.keep
+/publish-github.ps1
+
+# User data
+/projects/*
+!/projects/.keep
+/home/*
+!/home/.keep
+/data/*
+!/data/.keep
+/backups/*
+!/backups/.keep
+
+# Temporary files
+*.log
+*.tmp
+*.bak
+*.backup-*
+.DS_Store
+Thumbs.db

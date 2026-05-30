@@ -1,0 +1,7 @@
+{
+  "dependencies": {
+    "oh-my-openagent": "latest",
+    "@opencode-ai/plugin": "latest",
+    "@code-yeongyu/comment-checker": "latest"
+  }
+}
