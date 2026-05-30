@@ -1,5 +1,4 @@
-﻿
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 $OutputEncoding = [Text.Encoding]::UTF8
 
@@ -14,9 +13,14 @@ function Write-Ok([string]$Text) { Write-Host $Text -ForegroundColor Green }
 function Write-Warn([string]$Text) { Write-Host $Text -ForegroundColor Yellow }
 function Write-Err([string]$Text) { Write-Host $Text -ForegroundColor Red }
 
+function Write-Utf8NoBom([string]$Path, [string]$Text) {
+  $enc = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllText($Path, $Text, $enc)
+}
+
 function Read-ConfFile([string]$Path) {
   $map = @{}
-  if (!(Test-Path $Path)) { return $map }
+  if (!(Test-Path -LiteralPath $Path)) { return $map }
   foreach ($line in Get-Content -LiteralPath $Path -Encoding UTF8) {
     $t = $line.Trim()
     if ($t -eq "" -or $t.StartsWith("#")) { continue }
@@ -39,53 +43,95 @@ function ConfBool([string]$Name, [bool]$Default = $false) {
   return @("1", "true", "yes", "on", "y") -contains $v.ToLowerInvariant()
 }
 
-function Invoke-Text([string]$Exe, [string[]]$Args, [string]$WorkingDirectory = $null, [switch]$AllowFail) {
+function Quote-CmdArg([string]$Arg) {
+  if ($null -eq $Arg) { return '""' }
+  if ($Arg -eq "") { return '""' }
+  if ($Arg -notmatch '[\s"&()<>|^]') { return $Arg }
+  $escaped = $Arg.Replace('"', '\"')
+  return '"' + $escaped + '"'
+}
+
+function Resolve-CommandPath([string]$Name) {
+  $cmd = Get-Command $Name -ErrorAction SilentlyContinue
+  if (!$cmd) { throw "未找到命令：$Name。请先安装或加入 PATH。" }
+
+  $candidates = @()
+  foreach ($prop in @("Path", "Source", "Definition")) {
+    try {
+      $v = [string]$cmd.$prop
+      if ($v -and $v.Trim()) { $candidates += $v.Trim() }
+    } catch { }
+  }
+
+  foreach ($c in $candidates) {
+    $clean = $c.Trim('"')
+    if ($clean -and (Test-Path -LiteralPath $clean)) { return (Resolve-Path -LiteralPath $clean).Path }
+  }
+
+  if ($Name -and $Name.Trim()) { return $Name }
+  throw "命令解析失败：$Name"
+}
+
+function Invoke-Text([string]$Exe, [string[]]$NativeArgs, [string]$WorkingDirectory = $null, [switch]$AllowFail) {
+  if ([string]::IsNullOrWhiteSpace($Exe)) { throw "内部错误：Invoke-Text 收到空命令名。" }
+
+  $cmdExe = $env:ComSpec
+  if ([string]::IsNullOrWhiteSpace($cmdExe) -or !(Test-Path -LiteralPath $cmdExe)) {
+    $cmdExe = Join-Path $env:SystemRoot "System32\cmd.exe"
+  }
+  if (!(Test-Path -LiteralPath $cmdExe)) { throw "找不到 cmd.exe，无法执行外部命令。" }
+
+  $parts = New-Object System.Collections.Generic.List[string]
+  [void]$parts.Add((Quote-CmdArg $Exe))
+  foreach ($a in $NativeArgs) { [void]$parts.Add((Quote-CmdArg ([string]$a))) }
+  $cmdLine = ($parts -join " ")
+
   $psi = New-Object System.Diagnostics.ProcessStartInfo
-  $psi.FileName = $Exe
+  $psi.FileName = $cmdExe
+  $psi.Arguments = "/d /s /c " + '"' + $cmdLine + '"'
   if ($WorkingDirectory) { $psi.WorkingDirectory = $WorkingDirectory }
   $psi.UseShellExecute = $false
   $psi.RedirectStandardOutput = $true
   $psi.RedirectStandardError = $true
-  foreach ($a in $Args) { [void]$psi.ArgumentList.Add($a) }
+  $psi.StandardOutputEncoding = [Text.Encoding]::UTF8
+  $psi.StandardErrorEncoding = [Text.Encoding]::UTF8
+
   $p = [System.Diagnostics.Process]::Start($psi)
+  if (!$p) { throw "无法启动进程：$Exe" }
   $out = $p.StandardOutput.ReadToEnd()
   $err = $p.StandardError.ReadToEnd()
   $p.WaitForExit()
-  if ($p.ExitCode -ne 0 -and !$AllowFail) {
-    throw "命令失败：$Exe $($Args -join ' ')`n$out`n$err"
-  }
-  return [pscustomobject]@{ Code = $p.ExitCode; Out = $out; Err = $err }
-}
 
-function Require-Command([string]$Name) {
-  $cmd = Get-Command $Name -ErrorAction SilentlyContinue
-  if (!$cmd) { throw "未找到命令：$Name。请先安装或加入 PATH。" }
-  return $cmd.Source
+  if ($p.ExitCode -ne 0 -and !$AllowFail) {
+    throw "命令失败：$cmdLine`n$out`n$err"
+  }
+  return [pscustomobject]@{ Code = $p.ExitCode; Out = $out; Err = $err; CommandLine = $cmdLine }
 }
 
 function Resolve-GitRoot() {
-  $git = Require-Command "git"
+  $git = Resolve-CommandPath "git"
   $tryDirs = @($ToolRoot, (Get-Location).Path)
   foreach ($d in $tryDirs) {
-    if (!$d) { continue }
+    if ([string]::IsNullOrWhiteSpace($d)) { continue }
     $r = Invoke-Text $git @("-C", $d, "rev-parse", "--show-toplevel") -AllowFail
     if ($r.Code -eq 0) {
       $root = ($r.Out -split "`r?`n" | Select-Object -First 1).Trim()
       if ($root -and (Test-Path -LiteralPath $root)) { return (Resolve-Path -LiteralPath $root).Path }
     }
   }
+
   $cur = $ToolRoot
   while ($cur) {
     if (Test-Path -LiteralPath (Join-Path $cur ".git")) { return (Resolve-Path -LiteralPath $cur).Path }
     $parent = Split-Path -Parent $cur
-    if ($parent -eq $cur) { break }
+    if (!$parent -or $parent -eq $cur) { break }
     $cur = $parent
   }
   throw "当前目录不是 Git 仓库，也无法从脚本位置向上找到 .git。"
 }
 
-function Git([string[]]$Args, [switch]$AllowFail) {
-  return Invoke-Text $GitExe (@("-C", $GitRoot) + $Args) -AllowFail:$AllowFail
+function Git([string[]]$GitArgs, [switch]$AllowFail) {
+  return Invoke-Text $GitExe (@("-C", $GitRoot) + $GitArgs) -AllowFail:$AllowFail
 }
 
 function Get-VersionFromFile([string]$Path) {
@@ -108,19 +154,21 @@ function Next-Version([string]$Version) {
 
 function Replace-VersionInTextFile([string]$Path, [string]$Old, [string]$New) {
   if (!(Test-Path -LiteralPath $Path)) { return }
+  $name = [IO.Path]::GetFileName($Path)
   $ext = [IO.Path]::GetExtension($Path).ToLowerInvariant()
   $allowed = @(".md", ".txt", ".json", ".jsonc", ".ps1", ".cmd", ".conf", ".yml", ".yaml")
-  if ($allowed -notcontains $ext -and ([IO.Path]::GetFileName($Path)).ToUpperInvariant() -ne "VERSION") { return }
+  if ($allowed -notcontains $ext -and $name.ToUpperInvariant() -ne "VERSION") { return }
+
   $raw = Get-Content -LiteralPath $Path -Raw -Encoding UTF8
-  $newRaw = $raw.Replace($Old, $New).Replace("v$Old", "v$New")
-  if ($newRaw -ne $raw) { Set-Content -LiteralPath $Path -Value $newRaw -Encoding UTF8NoBOM }
+  $newRaw = $raw.Replace("v$Old", "v$New").Replace($Old, $New)
+  if ($newRaw -ne $raw) { Write-Utf8NoBom $Path $newRaw }
 }
 
 function Set-VersionEverywhere([string]$Old, [string]$New) {
   $versionFile = Join-Path $GitRoot (Conf "VERSION_FILE" "VERSION")
-  Set-Content -LiteralPath $versionFile -Value $New -Encoding UTF8NoBOM
+  Write-Utf8NoBom $versionFile ($New + "`r`n")
 
-  $skipDirs = @(".git", "node_modules", "npm-global", "repo-cache", "logs", ".release", "backups", "vault")
+  $skipDirs = @(".git", "node_modules", "npm-global", "repo-cache", "logs", ".release", "release-output", "backups", "vault")
   $files = Get-ChildItem -LiteralPath $GitRoot -Recurse -File -Force | Where-Object {
     $full = $_.FullName
     foreach ($sd in $skipDirs) {
@@ -136,12 +184,12 @@ function Ensure-GitIgnoreReleaseRules() {
   $gi = Join-Path $GitRoot ".gitignore"
   $rules = @("/.release/", "/release-output/", "/opencode-pocket-kit-v*.zip", "/*.release.zip")
   $existing = @()
-  if (Test-Path -LiteralPath $gi) { $existing = Get-Content -LiteralPath $gi -Encoding UTF8 }
+  if (Test-Path -LiteralPath $gi) { $existing = @(Get-Content -LiteralPath $gi -Encoding UTF8) }
   $changed = $false
   foreach ($r in $rules) {
     if ($existing -notcontains $r) { $existing += $r; $changed = $true }
   }
-  if ($changed) { Set-Content -LiteralPath $gi -Value ($existing -join "`r`n") -Encoding UTF8NoBOM }
+  if ($changed) { Write-Utf8NoBom $gi (($existing -join "`r`n") + "`r`n") }
 }
 
 function Remove-TrackedReleaseZips() {
@@ -173,7 +221,9 @@ function Has-NewCommitSinceTag([string]$Tag) {
   if (!$Tag) { return $true }
   $r = Git @("rev-list", "$Tag..HEAD", "--count") -AllowFail
   if ($r.Code -ne 0) { return $true }
-  return ([int](($r.Out).Trim())) -gt 0
+  $countText = ($r.Out).Trim()
+  if (!$countText) { return $false }
+  return ([int]$countText) -gt 0
 }
 
 function Build-ReleaseNotes([string]$OldTag, [string]$NewTag) {
@@ -203,7 +253,7 @@ function Build-ReleaseNotes([string]$OldTag, [string]$NewTag) {
 
   if ($lines.Count -eq 0) { [void]$lines.Add("OpenCode Pocket Kit $NewTag") }
   $notes = Join-Path $ReleaseDir "release-notes-$NewTag.md"
-  Set-Content -LiteralPath $notes -Value ($lines -join "`r`n") -Encoding UTF8NoBOM
+  Write-Utf8NoBom $notes (($lines -join "`r`n") + "`r`n")
   return $notes
 }
 
@@ -218,8 +268,8 @@ function Create-ReleaseZip([string]$Version) {
 
 function Ensure-GhRelease([string]$Tag, [string]$ZipPath, [string]$NotesPath) {
   if (!(ConfBool "CREATE_GITHUB_RELEASE" $true)) { return }
-  $gh = Require-Command "gh"
-  $status = Invoke-Text $gh @("auth", "status") -AllowFail
+  $gh = Resolve-CommandPath "gh"
+  $status = Invoke-Text $gh @("auth", "status") -WorkingDirectory $GitRoot -AllowFail
   if ($status.Code -ne 0) { throw "GitHub CLI 未登录。请先运行：gh auth login" }
 
   $view = Invoke-Text $gh @("release", "view", $Tag) -WorkingDirectory $GitRoot -AllowFail
@@ -240,7 +290,7 @@ function Ensure-GhRelease([string]$Tag, [string]$ZipPath, [string]$NotesPath) {
 
 try {
   Write-Info "OpenCode Pocket Kit 一键发布版本工具"
-  $GitExe = Require-Command "git"
+  $GitExe = Resolve-CommandPath "git"
   $GitRoot = Resolve-GitRoot
   Write-Info "仓库目录：$GitRoot"
 
@@ -272,7 +322,6 @@ try {
   if (Has-WorkingTreeChanges) {
     if (ConfBool "AUTO_COMMIT_CHANGES" $true) {
       [void](Git @("add", "-A"))
-      # 保险：不要把发行输出加入暂存区。
       [void](Git @("reset", "--", ".release", "release-output", "opencode-pocket-kit-v$newVersion.zip") -AllowFail)
       $prefix = Conf "COMMIT_MESSAGE_PREFIX" "release"
       [void](Git @("commit", "-m", "$prefix`: OpenCode Pocket Kit $newTag"))
@@ -282,7 +331,7 @@ try {
   }
 
   $tagExists = Git @("rev-parse", "-q", "--verify", "refs/tags/$newTag") -AllowFail
-  if ($tagExists.Code -eq 0) { throw "标签已存在：$newTag" }
+  if ($tagExists.Code -eq 0) { throw "标签已存在：$newTag。请检查 VERSION 或先删除/处理该标签。" }
   [void](Git @("tag", "-a", $newTag, "-m", "OpenCode Pocket Kit $newTag"))
 
   $zip = Create-ReleaseZip $newVersion
