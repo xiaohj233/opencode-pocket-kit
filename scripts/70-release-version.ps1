@@ -6,7 +6,7 @@ $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 $ProjectName = "OpenCode Pocket Kit"
-$ScriptVersion = "1.0.0"
+$ScriptVersion = "1.0.1"
 
 function Write-Info([string]$Text) { Write-Host $Text -ForegroundColor Cyan }
 function Write-Ok([string]$Text) { Write-Host $Text -ForegroundColor Green }
@@ -168,10 +168,10 @@ function Get-LastVersionTag {
 
 function Get-VersionFromFile {
   $versionFile = Join-Path $script:GitRoot "VERSION"
-  if (!(Test-Path -LiteralPath $versionFile)) { return "1.0.0" }
+  if (!(Test-Path -LiteralPath $versionFile)) { return "1.0.1" }
   $v = (Get-Content -LiteralPath $versionFile -Raw -Encoding UTF8).Trim()
   if ($v -match '^v') { $v = $v.Substring(1) }
-  if ($v -notmatch '^\d+\.\d+\.\d+$') { return "1.0.0" }
+  if ($v -notmatch '^\d+\.\d+\.\d+$') { return "1.0.1" }
   return $v
 }
 

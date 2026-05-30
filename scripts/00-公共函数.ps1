@@ -1,6 +1,6 @@
 ﻿
 $ErrorActionPreference = "Stop"
-$script:PortableVersion = "V1.0.0"
+$script:PortableVersion = "V1.0.1"
 $script:ProductName = "OpenCode Pocket Kit"
 $script:PortableRoot = Split-Path -Parent $PSScriptRoot
 $script:BinDir = Join-Path $script:PortableRoot "bin"
@@ -893,3 +893,4 @@ function Get-MissingEnvReferencesFromConfigFile([string]$Path) {
   }
   return @($missing)
 }
+

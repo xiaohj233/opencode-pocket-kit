@@ -1,8 +1,8 @@
-# OpenCode Pocket Kit
+﻿# OpenCode Pocket Kit
 
 <div align="center">
 
-![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)
+![Version](https://img.shields.io/badge/version-1.0.1-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-Windows-0078D4.svg)
 ![PowerShell](https://img.shields.io/badge/powershell-5.1+-5391FE.svg)
 ![OpenCode](https://img.shields.io/badge/OpenCode-portable-111827.svg)
@@ -243,3 +243,4 @@ config\opencode\
 ## 许可证
 
 本便携包脚本采用 MIT License。OpenCode、Oh-My-OpenAgent、Superpowers、Tavily Skills、Anthropic Skills 以及其他上游组件遵循各自项目许可证。
+
