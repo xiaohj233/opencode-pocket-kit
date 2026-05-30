@@ -44,3 +44,7 @@
 *.backup-*
 .DS_Store
 Thumbs.db
+/.release/
+/release-output/
+/opencode-pocket-kit-v*.zip
+/*.release.zip
