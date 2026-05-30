@@ -16,11 +16,11 @@ $script:RepoCacheDir = Join-Path $script:PortableRoot "repo-cache"
 $script:StateDir = Join-Path $script:PortableRoot ".portable-state"
 $script:ProxyConf = Join-Path $script:PortableRoot "proxy.conf"
 
-foreach ($d in @($BinDir, $ConfigDir, $VaultDir, $ProjectsDir, $LogsDir, $CacheDir, $NpmGlobalDir, $HomeDir, $DataDir, $RepoCacheDir, $StateDir)) {
+foreach ($d in @($BinDir,$ConfigDir,$VaultDir,$ProjectsDir,$LogsDir,$CacheDir,$NpmGlobalDir,$HomeDir,$DataDir,$RepoCacheDir,$StateDir)) {
   New-Item -ItemType Directory -Force -Path $d | Out-Null
 }
 
-function Write-Color { param([string]$Text, [string]$Color = "White") Write-Host $Text -ForegroundColor $Color }
+function Write-Color { param([string]$Text,[string]$Color="White") Write-Host $Text -ForegroundColor $Color }
 
 function Get-ConfMap {
   $map = @{}
@@ -30,8 +30,8 @@ function Get-ConfMap {
       if ($t -eq "" -or $t.StartsWith("#")) { continue }
       $idx = $t.IndexOf("=")
       if ($idx -lt 1) { continue }
-      $k = $t.Substring(0, $idx).Trim()
-      $v = $t.Substring($idx + 1).Trim()
+      $k = $t.Substring(0,$idx).Trim()
+      $v = $t.Substring($idx+1).Trim()
       $map[$k] = $v
     }
   }
@@ -39,15 +39,15 @@ function Get-ConfMap {
 }
 
 $script:Conf = Get-ConfMap
-function Conf([string]$Key, [string]$Default = "") {
+function Conf([string]$Key,[string]$Default="") {
   if ($script:Conf.ContainsKey($Key) -and $null -ne $script:Conf[$Key] -and $script:Conf[$Key] -ne "") { return [string]$script:Conf[$Key] }
   return $Default
 }
-function ConfBool([string]$Key, [bool]$Default = $false) {
-  $v = (Conf $Key ($(if ($Default) { "1" }else { "0" }))).ToLowerInvariant()
-  return @("1", "true", "yes", "on", "y") -contains $v
+function ConfBool([string]$Key,[bool]$Default=$false) {
+  $v = (Conf $Key ($(if($Default){"1"}else{"0"}))).ToLowerInvariant()
+  return @("1","true","yes","on","y") -contains $v
 }
-function ConfInt([string]$Key, [int]$Default) {
+function ConfInt([string]$Key,[int]$Default) {
   $v = Conf $Key ""
   $out = 0
   if ([int]::TryParse($v, [ref]$out)) { return $out }
@@ -70,7 +70,7 @@ function Apply-PortableEnvironment {
   $runtimeRoot = Join-Path $env:TEMP ("opencode-portable-runtime\" + ([Math]::Abs($PortableRoot.GetHashCode()).ToString("x")))
   $runtimeCache = Join-Path $runtimeRoot "cache"
   $runtimeTmp = Join-Path $runtimeRoot "tmp"
-  New-Item -ItemType Directory -Force -Path $runtimeCache, $runtimeTmp | Out-Null
+  New-Item -ItemType Directory -Force -Path $runtimeCache,$runtimeTmp | Out-Null
 
   $env:USERPROFILE = $HomeDir
   $env:HOME = $HomeDir
@@ -93,10 +93,26 @@ function Apply-PortableEnvironment {
   $env:TMP = $runtimeTmp
   $nodePath = Join-Path $NpmGlobalDir "node_modules"
   $configNodePath = Join-Path $ConfigDir "node_modules"
-  $nodePathParts = @($configNodePath, $nodePath)
-  if ($env:NODE_PATH) { $nodePathParts += $env:NODE_PATH }
+  $nodePathParts = New-Object System.Collections.Generic.List[string]
+  foreach ($item in @($configNodePath, $nodePath)) {
+    if ($item -and !$nodePathParts.Contains($item)) { [void]$nodePathParts.Add($item) }
+  }
+  if ($env:NODE_PATH) {
+    foreach ($item in ($env:NODE_PATH -split ';')) {
+      if ($item -and !$nodePathParts.Contains($item)) { [void]$nodePathParts.Add($item) }
+    }
+  }
   $env:NODE_PATH = ($nodePathParts -join ";")
-  $env:PATH = "$BinDir;$NpmGlobalDir;$NpmGlobalDir\node_modules\.bin;$ConfigDir\node_modules\.bin;$env:PATH"
+  $pathParts = New-Object System.Collections.Generic.List[string]
+  foreach ($item in @($BinDir, (Join-Path $ConfigDir "node_modules\.bin"), $NpmGlobalDir, (Join-Path $NpmGlobalDir "node_modules\.bin"))) {
+    if ($item -and !$pathParts.Contains($item)) { [void]$pathParts.Add($item) }
+  }
+  if ($env:PATH) {
+    foreach ($item in ($env:PATH -split ';')) {
+      if ($item -and !$pathParts.Contains($item)) { [void]$pathParts.Add($item) }
+    }
+  }
+  $env:PATH = ($pathParts -join ";")
   $env:GIT_TERMINAL_PROMPT = "0"
   $env:GCM_INTERACTIVE = "Never"
 
@@ -114,7 +130,7 @@ function Apply-PortableEnvironment {
   }
 }
 
-function Resolve-Cmd([string]$Name, [bool]$Required = $true) {
+function Resolve-Cmd([string]$Name,[bool]$Required=$true) {
   $cmd = Get-Command $Name -ErrorAction SilentlyContinue
   if ($cmd) { return $cmd.Source }
   if ($Required) { throw "未找到必需命令： $Name" }
@@ -124,16 +140,16 @@ function Resolve-Cmd([string]$Name, [bool]$Required = $true) {
 function Quote-CmdArg([string]$s) {
   if ($null -eq $s) { return '""' }
   if ($s -eq '') { return '""' }
-  $escaped = $s -replace '"', '\"'
+  $escaped = $s -replace '"','\"'
   if ($escaped -match '[\s&()\[\]{}^=;!''+,`~|<>]') { return '"' + $escaped + '"' }
   return $escaped
 }
 
 function Invoke-NativeCapture {
   param(
-    [Parameter(Mandatory = $true)][string]$File,
-    [string[]]$Arguments = @(),
-    [int]$TimeoutSeconds = 300,
+    [Parameter(Mandatory=$true)][string]$File,
+    [string[]]$Arguments=@(),
+    [int]$TimeoutSeconds=300,
     [switch]$AllowFailure
   )
   $cmdLine = ((@($File) + @($Arguments)) | ForEach-Object { Quote-CmdArg ([string]$_) }) -join ' '
@@ -171,19 +187,19 @@ function Invoke-NativeCapture {
 }
 
 function Git-BaseArgs {
-  $base = @("-c", "http.version=HTTP/1.1", "-c", "http.lowSpeedLimit=$(ConfInt 'GIT_LOW_SPEED_LIMIT' 1000)", "-c", "http.lowSpeedTime=$(ConfInt 'GIT_LOW_SPEED_TIME_SECONDS' 180)", "-c", "credential.helper=", "-c", "core.askPass=")
-  if ($script:ProxyUrl) { $base += @("-c", "http.proxy=$script:ProxyUrl", "-c", "https.proxy=$script:ProxyUrl") }
-  $base += @("-c", "http.sslBackend=schannel")
+  $base = @("-c","http.version=HTTP/1.1","-c","http.lowSpeedLimit=$(ConfInt 'GIT_LOW_SPEED_LIMIT' 1000)","-c","http.lowSpeedTime=$(ConfInt 'GIT_LOW_SPEED_TIME_SECONDS' 180)","-c","credential.helper=","-c","core.askPass=")
+  if ($script:ProxyUrl) { $base += @("-c","http.proxy=$script:ProxyUrl","-c","https.proxy=$script:ProxyUrl") }
+  $base += @("-c","http.sslBackend=schannel")
   return $base
 }
 function Invoke-Git {
-  param([Alias('Args')][string[]]$GitArguments, [int]$TimeoutSeconds = 300, [switch]$AllowFailure)
+  param([Alias('Args')][string[]]$GitArguments,[int]$TimeoutSeconds=300,[switch]$AllowFailure)
   $git = Resolve-Cmd "git" $true
   if (ConfBool "GIT_VERBOSE" $false) { $env:GIT_CURL_VERBOSE = "1" } else { Remove-Item Env:\GIT_CURL_VERBOSE -ErrorAction SilentlyContinue }
   return Invoke-NativeCapture -File $git -Arguments ((Git-BaseArgs) + @($GitArguments)) -TimeoutSeconds $TimeoutSeconds -AllowFailure:$AllowFailure
 }
 
-function Copy-DirectoryClean([string]$Source, [string]$Dest) {
+function Copy-DirectoryClean([string]$Source,[string]$Dest) {
   if (!(Test-Path -LiteralPath $Source)) { return $false }
   if (Test-Path -LiteralPath $Dest) { Remove-Item -LiteralPath $Dest -Recurse -Force -ErrorAction SilentlyContinue }
   New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Dest) | Out-Null
@@ -192,16 +208,25 @@ function Copy-DirectoryClean([string]$Source, [string]$Dest) {
 }
 
 function Get-PortableOpenCodePath {
-  foreach ($p in @((Join-Path $BinDir "opencode.exe"), (Join-Path $BinDir "opencode.cmd"), (Join-Path $NpmGlobalDir "opencode.cmd"), (Join-Path $NpmGlobalDir "node_modules\.bin\opencode.cmd"))) {
+  foreach ($p in @((Join-Path $BinDir "opencode.exe"),(Join-Path $BinDir "opencode.cmd"),(Join-Path $NpmGlobalDir "opencode.cmd"),(Join-Path $NpmGlobalDir "node_modules\.bin\opencode.cmd"))) {
     if (Test-Path $p) { return $p }
   }
   return ""
 }
 
-function Get-LocalNpmPackageVersion([string]$PackageName) {
-  $pkgJson = Join-Path (Join-Path $NpmGlobalDir "node_modules") (Join-Path $PackageName "package.json")
-  if (!(Test-Path $pkgJson)) { return "" }
+function Get-NpmPackageVersionAt([string]$NodeModulesDir, [string]$PackageName) {
+  if (!$NodeModulesDir -or !$PackageName) { return "" }
+  $pkgJson = Join-Path $NodeModulesDir (Join-Path $PackageName "package.json")
+  if (!(Test-Path -LiteralPath $pkgJson)) { return "" }
   try { return ([string]((Get-Content -LiteralPath $pkgJson -Raw -Encoding UTF8 | ConvertFrom-Json).version)) } catch { return "" }
+}
+
+function Get-LocalNpmPackageVersion([string]$PackageName) {
+  return (Get-NpmPackageVersionAt (Join-Path $NpmGlobalDir "node_modules") $PackageName)
+}
+
+function Get-ConfigNpmPackageVersion([string]$PackageName) {
+  return (Get-NpmPackageVersionAt (Join-Path $ConfigDir "node_modules") $PackageName)
 }
 
 function Get-OmoPackageName {
@@ -230,15 +255,15 @@ function Get-OmoConfigBaseName {
 }
 
 function Get-NpmLatestVersion([string]$PackageName) {
-  $npm = Resolve-Cmd "npm.cmd" $false; if (!$npm) { $npm = Resolve-Cmd "npm" $true }
+  $npm = Resolve-Cmd "npm.cmd" $false; if(!$npm){ $npm = Resolve-Cmd "npm" $true }
   $reg = Conf "NPM_REGISTRY" "https://registry.npmjs.org"
-  $res = Invoke-NativeCapture -File $npm -Arguments @("view", $PackageName, "version", "--registry=$reg") -TimeoutSeconds 120 -AllowFailure
+  $res = Invoke-NativeCapture -File $npm -Arguments @("view",$PackageName,"version","--registry=$reg") -TimeoutSeconds 120 -AllowFailure
   if ($res.ExitCode -ne 0) { return "" }
   return ($res.Output -split "`r?`n" | Where-Object { $_.Trim() -match '^\d+\.\d+\.\d+' } | Select-Object -First 1).Trim()
 }
 
-function Install-NpmPackageIfNeeded([string]$PackageSpec, [string]$PackageName, [string]$Purpose, [bool]$Force = $false) {
-  $npm = Resolve-Cmd "npm.cmd" $false; if (!$npm) { $npm = Resolve-Cmd "npm" $true }
+function Install-NpmPackageIfNeeded([string]$PackageSpec,[string]$PackageName,[string]$Purpose,[bool]$Force=$false) {
+  $npm = Resolve-Cmd "npm.cmd" $false; if(!$npm){ $npm = Resolve-Cmd "npm" $true }
   $reg = Conf "NPM_REGISTRY" "https://registry.npmjs.org"
   $local = Get-LocalNpmPackageVersion $PackageName
   $latest = Get-NpmLatestVersion $PackageName
@@ -250,9 +275,9 @@ function Install-NpmPackageIfNeeded([string]$PackageSpec, [string]$PackageName, 
     Write-Color "⚠️ 无法查询最新版本： $PackageName. 保留本地版本 $PackageName@$local." Yellow
     return $true
   }
-  $reason = if (!$local) { "missing" } elseif ($latest) { "$local -> $latest" } else { "requested" }
+  $reason = if(!$local){"missing"} elseif($latest){"$local -> $latest"} else {"requested"}
   Write-Color "📦 正在安装/更新 ${Purpose}： $PackageSpec ($reason)" Cyan
-  $args = @("install", "-g", $PackageSpec, "--registry=$reg", "--foreground-scripts", "--loglevel=notice", "--no-audit", "--no-fund")
+  $args = @("install","-g",$PackageSpec,"--registry=$reg","--foreground-scripts","--loglevel=notice","--no-audit","--no-fund")
   $res = Invoke-NativeCapture -File $npm -Arguments $args -TimeoutSeconds (ConfInt "NPM_PACKAGE_TIMEOUT_SECONDS" 900) -AllowFailure
   if ($res.Output) { Write-Host $res.Output }
   if ($res.ExitCode -ne 0) { Write-Color "⚠️ npm 安装 $PackageSpec 返回退出码 $($res.ExitCode)。" Yellow; return $false }
@@ -261,20 +286,21 @@ function Install-NpmPackageIfNeeded([string]$PackageSpec, [string]$PackageName, 
 
 function Get-InstalledOmoPackage {
   $preferred = Get-OmoPackageName
-  if (Get-LocalNpmPackageVersion $preferred) { return $preferred }
-  if ($preferred -ne "oh-my-openagent" -and (Get-LocalNpmPackageVersion "oh-my-openagent")) { return "oh-my-openagent" }
-  if ($preferred -ne "oh-my-opencode" -and (Get-LocalNpmPackageVersion "oh-my-opencode")) { return "oh-my-opencode" }
+  foreach ($pkg in @($preferred, 'oh-my-openagent', 'oh-my-opencode') | Where-Object { $_ } | Select-Object -Unique) {
+    if (Get-ConfigNpmPackageVersion $pkg) { return $pkg }
+    if (Get-LocalNpmPackageVersion $pkg) { return $pkg }
+  }
   return ""
 }
 
 function ConvertTo-HashtableDeep($InputObject) {
   if ($null -eq $InputObject) { return $null }
   if ($InputObject -is [System.Collections.IDictionary]) {
-    $h = @{}; foreach ($k in $InputObject.Keys) { $h[$k] = ConvertTo-HashtableDeep $InputObject[$k] }; return $h
+    $h=@{}; foreach($k in $InputObject.Keys){ $h[$k] = ConvertTo-HashtableDeep $InputObject[$k] }; return $h
   }
   if ($InputObject -is [System.Array]) { return @($InputObject | ForEach-Object { ConvertTo-HashtableDeep $_ }) }
   if ($InputObject -is [pscustomobject]) {
-    $h = @{}; foreach ($p in $InputObject.PSObject.Properties) { $h[$p.Name] = ConvertTo-HashtableDeep $p.Value }; return $h
+    $h=@{}; foreach($p in $InputObject.PSObject.Properties){ $h[$p.Name] = ConvertTo-HashtableDeep $p.Value }; return $h
   }
   return $InputObject
 }
@@ -295,14 +321,11 @@ function ConvertTo-StringArraySafe($Value) {
   $items = @()
   if ($Value -is [string]) {
     $items = @($Value)
-  }
-  elseif ($Value -is [System.Collections.IDictionary]) {
+  } elseif ($Value -is [System.Collections.IDictionary]) {
     $items = @($Value)
-  }
-  elseif ($Value -is [System.Collections.IEnumerable]) {
+  } elseif ($Value -is [System.Collections.IEnumerable]) {
     foreach ($x in $Value) { $items += $x }
-  }
-  else {
+  } else {
     $items = @($Value)
   }
 
@@ -354,8 +377,7 @@ function Repair-OpenCodeConfigFile {
   $changed = $false
   try {
     $cfg = ConvertTo-HashtableDeep ($raw | ConvertFrom-Json)
-  }
-  catch {
+  } catch {
     $bak = $configFile + ".bad-json-" + (Get-Date -Format "yyyyMMdd-HHmmss") + ".bak"
     Copy-Item -LiteralPath $configFile -Destination $bak -Force
     Write-Color "⚠️ opencode.json 无法解析。已备份到 $bak 并创建最小配置。" Yellow
@@ -383,7 +405,7 @@ function Repair-OpenCodeConfigFile {
 
   # Deduplicate and normalize OMO naming. Keep exactly the configured OMO plugin name.
   # 本包默认使用 oh-my-openagent；其他同类插件名仅在显式配置时保留。
-  $omoAliases = @('oh-my-openagent', 'oh-my-opencode')
+  $omoAliases = @('oh-my-openagent','oh-my-opencode')
   $seen = @{}
   $cleanPlugins = @()
   foreach ($s0 in $stringPlugins) {
@@ -394,8 +416,7 @@ function Repair-OpenCodeConfigFile {
     if (!$seen.ContainsKey($s)) {
       $seen[$s] = $true
       $cleanPlugins += $s
-    }
-    else {
+    } else {
       $changed = $true
     }
   }
@@ -414,8 +435,7 @@ function Repair-OpenCodeConfigFile {
   if ($newPlugins.Count -gt 0) {
     if (!$hadPlugin -or $oldPluginJson -ne $newPluginJson) { $changed = $true }
     $cfg['plugin'] = @($newPlugins)
-  }
-  else {
+  } else {
     if ($cfg.ContainsKey('plugin')) { [void]$cfg.Remove('plugin'); $changed = $true }
   }
 
@@ -456,8 +476,8 @@ function Get-PreferredModelFromEnvNames([string[]]$Names) {
 
 function Get-PreferredRuntimeModelFromEnv {
   $names = @()
-  foreach ($n in @('OPENROUTER_API_KEY', 'DEEPSEEK_API_KEY', 'OPENAI_API_KEY', 'MOONSHOT_API_KEY', 'SILICONFLOW_API_KEY', 'DASHSCOPE_API_KEY', 'ZHIPUAI_API_KEY')) {
-    if ([Environment]::GetEnvironmentVariable($n, 'Process')) { $names += $n }
+  foreach ($n in @('OPENROUTER_API_KEY','DEEPSEEK_API_KEY','OPENAI_API_KEY','MOONSHOT_API_KEY','SILICONFLOW_API_KEY','DASHSCOPE_API_KEY','ZHIPUAI_API_KEY')) {
+    if ([Environment]::GetEnvironmentVariable($n,'Process')) { $names += $n }
   }
   return (Get-PreferredModelFromEnvNames $names)
 }
@@ -482,7 +502,7 @@ function Ensure-ProviderConfigForEnvNames {
   }
   $providers = $cfg['provider']
 
-  function Add-OpenAICompatibleProviderPreset([string]$Id, [string]$Name, [string]$BaseUrl, [string]$EnvName, [hashtable]$Models) {
+  function Add-OpenAICompatibleProviderPreset([string]$Id,[string]$Name,[string]$BaseUrl,[string]$EnvName,[hashtable]$Models) {
     if (!$nameSet.ContainsKey($EnvName.ToUpperInvariant())) { return }
     if (!$providers.ContainsKey($Id) -or $null -eq $providers[$Id] -or !($providers[$Id] -is [System.Collections.IDictionary])) {
       $providers[$Id] = @{}
@@ -498,13 +518,13 @@ function Ensure-ProviderConfigForEnvNames {
   }
 
   $script:__ProviderCfgChanged = $false
-  Add-OpenAICompatibleProviderPreset 'deepseek' 'DeepSeek' 'https://api.deepseek.com/v1' 'DEEPSEEK_API_KEY' @{ 'deepseek-chat' = @{ name = 'DeepSeek Chat' }; 'deepseek-reasoner' = @{ name = 'DeepSeek Reasoner' } }
-  Add-OpenAICompatibleProviderPreset 'openrouter' 'OpenRouter' 'https://openrouter.ai/api/v1' 'OPENROUTER_API_KEY' @{ 'anthropic/claude-sonnet-4.5' = @{ name = 'Claude Sonnet 4.5 via OpenRouter' }; 'openai/gpt-4.1' = @{ name = 'GPT 4.1 via OpenRouter' }; 'google/gemini-2.5-pro' = @{ name = 'Gemini 2.5 Pro via OpenRouter' } }
-  Add-OpenAICompatibleProviderPreset 'openai' 'OpenAI' 'https://api.openai.com/v1' 'OPENAI_API_KEY' @{ 'gpt-4.1' = @{ name = 'GPT 4.1' }; 'gpt-4.1-mini' = @{ name = 'GPT 4.1 Mini' } }
-  Add-OpenAICompatibleProviderPreset 'moonshot' 'Moonshot/Kimi' 'https://api.moonshot.cn/v1' 'MOONSHOT_API_KEY' @{ 'moonshot-v1-8k' = @{ name = 'Moonshot v1 8K' }; 'moonshot-v1-32k' = @{ name = 'Moonshot v1 32K' }; 'moonshot-v1-128k' = @{ name = 'Moonshot v1 128K' } }
-  Add-OpenAICompatibleProviderPreset 'siliconflow' 'SiliconFlow' 'https://api.siliconflow.cn/v1' 'SILICONFLOW_API_KEY' @{ 'deepseek-ai/DeepSeek-V3' = @{ name = 'DeepSeek V3' }; 'deepseek-ai/DeepSeek-R1' = @{ name = 'DeepSeek R1' } }
-  Add-OpenAICompatibleProviderPreset 'dashscope' 'DashScope Compatible' 'https://dashscope.aliyuncs.com/compatible-mode/v1' 'DASHSCOPE_API_KEY' @{ 'qwen-plus' = @{ name = 'Qwen Plus' }; 'qwen-max' = @{ name = 'Qwen Max' }; 'qwen-turbo' = @{ name = 'Qwen Turbo' } }
-  Add-OpenAICompatibleProviderPreset 'zhipu' 'Zhipu GLM Compatible' 'https://open.bigmodel.cn/api/paas/v4' 'ZHIPUAI_API_KEY' @{ 'glm-4-flash' = @{ name = 'GLM-4 Flash' }; 'glm-4-plus' = @{ name = 'GLM-4 Plus' }; 'glm-4-air' = @{ name = 'GLM-4 Air' } }
+  Add-OpenAICompatibleProviderPreset 'deepseek' 'DeepSeek' 'https://api.deepseek.com/v1' 'DEEPSEEK_API_KEY' @{ 'deepseek-chat'=@{ name='DeepSeek Chat' }; 'deepseek-reasoner'=@{ name='DeepSeek Reasoner' } }
+  Add-OpenAICompatibleProviderPreset 'openrouter' 'OpenRouter' 'https://openrouter.ai/api/v1' 'OPENROUTER_API_KEY' @{ 'anthropic/claude-sonnet-4.5'=@{ name='Claude Sonnet 4.5 via OpenRouter' }; 'openai/gpt-4.1'=@{ name='GPT 4.1 via OpenRouter' }; 'google/gemini-2.5-pro'=@{ name='Gemini 2.5 Pro via OpenRouter' } }
+  Add-OpenAICompatibleProviderPreset 'openai' 'OpenAI' 'https://api.openai.com/v1' 'OPENAI_API_KEY' @{ 'gpt-4.1'=@{ name='GPT 4.1' }; 'gpt-4.1-mini'=@{ name='GPT 4.1 Mini' } }
+  Add-OpenAICompatibleProviderPreset 'moonshot' 'Moonshot/Kimi' 'https://api.moonshot.cn/v1' 'MOONSHOT_API_KEY' @{ 'moonshot-v1-8k'=@{ name='Moonshot v1 8K' }; 'moonshot-v1-32k'=@{ name='Moonshot v1 32K' }; 'moonshot-v1-128k'=@{ name='Moonshot v1 128K' } }
+  Add-OpenAICompatibleProviderPreset 'siliconflow' 'SiliconFlow' 'https://api.siliconflow.cn/v1' 'SILICONFLOW_API_KEY' @{ 'deepseek-ai/DeepSeek-V3'=@{ name='DeepSeek V3' }; 'deepseek-ai/DeepSeek-R1'=@{ name='DeepSeek R1' } }
+  Add-OpenAICompatibleProviderPreset 'dashscope' 'DashScope Compatible' 'https://dashscope.aliyuncs.com/compatible-mode/v1' 'DASHSCOPE_API_KEY' @{ 'qwen-plus'=@{ name='Qwen Plus' }; 'qwen-max'=@{ name='Qwen Max' }; 'qwen-turbo'=@{ name='Qwen Turbo' } }
+  Add-OpenAICompatibleProviderPreset 'zhipu' 'Zhipu GLM Compatible' 'https://open.bigmodel.cn/api/paas/v4' 'ZHIPUAI_API_KEY' @{ 'glm-4-flash'=@{ name='GLM-4 Flash' }; 'glm-4-plus'=@{ name='GLM-4 Plus' }; 'glm-4-air'=@{ name='GLM-4 Air' } }
 
   if ($script:__ProviderCfgChanged) { $changed = $true }
   Remove-Variable __ProviderCfgChanged -Scope Script -ErrorAction SilentlyContinue
@@ -518,8 +538,7 @@ function Ensure-ProviderConfigForEnvNames {
   if ($changed) {
     Write-OpenCodeConfigHashtable $cfg $configFile
     Write-Color "✅ 已根据密钥预设更新 provider/model 配置。" Green
-  }
-  else {
+  } else {
     Write-Color "ℹ️ 不需要更新 provider 预设。" DarkGray
   }
   return $cfg
@@ -528,8 +547,8 @@ function Ensure-ProviderConfigForEnvNames {
 function Ensure-ProviderConfigFromLoadedEnv {
   # 仅保留给手动排查使用；启动.cmd 不会调用此函数。
   $names = @()
-  foreach ($n in @('OPENROUTER_API_KEY', 'DEEPSEEK_API_KEY', 'OPENAI_API_KEY', 'MOONSHOT_API_KEY', 'SILICONFLOW_API_KEY', 'DASHSCOPE_API_KEY', 'ZHIPUAI_API_KEY')) {
-    if ([Environment]::GetEnvironmentVariable($n, 'Process')) { $names += $n }
+  foreach ($n in @('OPENROUTER_API_KEY','DEEPSEEK_API_KEY','OPENAI_API_KEY','MOONSHOT_API_KEY','SILICONFLOW_API_KEY','DASHSCOPE_API_KEY','ZHIPUAI_API_KEY')) {
+    if ([Environment]::GetEnvironmentVariable($n,'Process')) { $names += $n }
   }
   return (Ensure-ProviderConfigForEnvNames $names)
 }
@@ -541,7 +560,7 @@ function New-OmoRouteConfigText([string]$Model) {
 function Test-OmoConfigLooksEmpty([string]$Path) {
   if (!(Test-Path -LiteralPath $Path)) { return $true }
   $raw = Get-Content -LiteralPath $Path -Raw -Encoding UTF8
-  $noSpace = ($raw -replace '\s', '')
+  $noSpace = ($raw -replace '\s','')
   return ($noSpace -eq '' -or $noSpace -eq '{}')
 }
 
@@ -550,16 +569,36 @@ function Ensure-OmoConfigFile {
   return $null
 }
 
+function Test-OmoCliCandidate([string]$Path, [string]$PackageName, [string]$RootDir) {
+  if (!(Test-Path -LiteralPath $Path)) { return $false }
+  if ($RootDir -and $PackageName) {
+    $pkgDir = Join-Path (Join-Path $RootDir "node_modules") $PackageName
+    if ($Path -like (Join-Path $RootDir "*") -and !(Test-Path -LiteralPath $pkgDir)) { return $false }
+  }
+  return $true
+}
+
 function Get-OmoCliPath([string]$PackageName) {
-  $names = @($PackageName, 'oh-my-openagent', 'oh-my-opencode') | Select-Object -Unique
+  $names = @($PackageName, 'oh-my-openagent', 'oh-my-opencode') | Where-Object { $_ } | Select-Object -Unique
   foreach ($n in $names) {
+    # 优先使用 config\opencode 下的依赖。这样即使删除 npm-global\node_modules，
+    # OMO 插件和 doctor 仍可从便携配置目录中运行。
     foreach ($p in @(
-        (Join-Path $NpmGlobalDir "$n.cmd"),
-        (Join-Path $NpmGlobalDir "node_modules\.bin\$n.cmd"),
-        (Join-Path $NpmGlobalDir "node_modules\$n\bin\$n.exe"),
-        (Join-Path $NpmGlobalDir "node_modules\$n\bin\oh-my-opencode.exe"),
-        (Join-Path $NpmGlobalDir "node_modules\$n\bin\oh-my-openagent.exe")
-      )) { if (Test-Path -LiteralPath $p) { return $p } }
+      (Join-Path $ConfigDir "node_modules\.bin\$n.cmd"),
+      (Join-Path $ConfigDir "node_modules\$n\bin\$n.exe"),
+      (Join-Path $ConfigDir "node_modules\$n\bin\oh-my-opencode.exe"),
+      (Join-Path $ConfigDir "node_modules\$n\bin\oh-my-openagent.exe")
+    )) { if (Test-OmoCliCandidate $p $n $ConfigDir) { return $p } }
+
+    # npm-global 只作为安装/更新时的兼容兜底。若 node_modules 被瘦身删除，
+    # 根目录遗留的 .cmd shim 会失效，这里会自动跳过。
+    foreach ($p in @(
+      (Join-Path $NpmGlobalDir "$n.cmd"),
+      (Join-Path $NpmGlobalDir "node_modules\.bin\$n.cmd"),
+      (Join-Path $NpmGlobalDir "node_modules\$n\bin\$n.exe"),
+      (Join-Path $NpmGlobalDir "node_modules\$n\bin\oh-my-opencode.exe"),
+      (Join-Path $NpmGlobalDir "node_modules\$n\bin\oh-my-openagent.exe")
+    )) { if (Test-OmoCliCandidate $p $n $NpmGlobalDir) { return $p } }
   }
   return ''
 }
@@ -616,19 +655,19 @@ function Ensure-TuiPluginConfig([string]$PluginName) {
   Write-Color "✅ 已在 tui.json 启用 TUI 插件：$pluginEntry" Green
 }
 
-function Ensure-PortableConfigNodeDependencies([string]$Reason = 'OMO portable config dependencies') {
-  $npm = Resolve-Cmd "npm.cmd" $false; if (!$npm) { $npm = Resolve-Cmd "npm" $true }
+function Ensure-PortableConfigNodeDependencies([string]$Reason='OMO portable config dependencies') {
+  $npm = Resolve-Cmd "npm.cmd" $false; if(!$npm){ $npm = Resolve-Cmd "npm" $true }
   $reg = Conf "NPM_REGISTRY" "https://registry.npmjs.org"
   if (!(Test-Path (Join-Path $ConfigDir "package.json"))) { return $false }
   Write-Color "📦 正在安装/更新便携配置目录的 node 依赖（$Reason）..." Cyan
-  $args = @("install", "--prefix", $ConfigDir, "--registry=$reg", "--foreground-scripts", "--loglevel=notice", "--no-audit", "--no-fund")
+  $args = @("install","--prefix",$ConfigDir,"--registry=$reg","--foreground-scripts","--loglevel=notice","--no-audit","--no-fund")
   $res = Invoke-NativeCapture -File $npm -Arguments $args -TimeoutSeconds (ConfInt "NPM_PACKAGE_TIMEOUT_SECONDS" 900) -AllowFailure
   if ($res.Output) { Write-Host $res.Output }
   if ($res.ExitCode -ne 0) { Write-Color "⚠️ 便携配置 npm install 返回退出码 $($res.ExitCode)." Yellow; return $false }
   return $true
 }
 
-function Ensure-CommentCheckerInstalled([bool]$Force = $false) {
+function Ensure-CommentCheckerInstalled([bool]$Force=$false) {
   $okGlobal = Install-NpmPackageIfNeeded '@code-yeongyu/comment-checker@latest' '@code-yeongyu/comment-checker' 'Comment checker' $Force
   $checkerBinCandidates = @(
     (Join-Path $NpmGlobalDir 'comment-checker.cmd'),
@@ -654,8 +693,7 @@ function Test-OmoConfigPluginPresent([string]$PluginName) {
         if ($p -eq $PluginName) { return $true }
       }
     }
-  }
-  catch {}
+  } catch {}
 
   # 保底：如果 JSON 类型转换在某些 PowerShell 环境中异常，直接从文本确认插件字符串是否存在。
   $escaped = [regex]::Escape($PluginName)
@@ -686,10 +724,10 @@ function Invoke-OmoInstallerIfAvailable([string]$PackageName) {
   # Keep this in install/update, not run.  The installer is the only place that may create
   # OMO 自己的 json/jsonc 配置文件；启动.cmd 不生成也不改写它们。
   $args = @(
-    'install', '--no-tui',
-    '--claude=no', '--openai=no', '--gemini=no', '--copilot=no',
-    '--opencode-go=no', '--opencode-zen=no', '--zai-coding-plan=no',
-    '--kimi-for-coding=no', '--vercel-ai-gateway=no', '--skip-auth'
+    'install','--no-tui',
+    '--claude=no','--openai=no','--gemini=no','--copilot=no',
+    '--opencode-go=no','--opencode-zen=no','--zai-coding-plan=no',
+    '--kimi-for-coding=no','--vercel-ai-gateway=no','--skip-auth'
   )
   $res = Invoke-NativeCapture -File $cli -Arguments $args -TimeoutSeconds (ConfInt 'OMO_INSTALLER_TIMEOUT_SECONDS' 360) -AllowFailure
   if ($res.Output) { Write-Host $res.Output }
@@ -703,14 +741,13 @@ function Test-PackDefaultOpenCodeConfig([string]$Path) {
     $cfg = ConvertTo-HashtableDeep (Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json)
     if ($null -eq $cfg -or !($cfg -is [System.Collections.IDictionary])) { return $false }
     foreach ($k in $cfg.Keys) {
-      if (@('$schema', 'plugin') -notcontains [string]$k) { return $false }
+      if (@('$schema','plugin') -notcontains [string]$k) { return $false }
     }
     $plugins = ConvertTo-StringArraySafe $cfg['plugin']
     if ($plugins.Count -eq 0) { return $true }
     if ($plugins.Count -eq 1 -and $plugins[0] -eq (Get-OmoPluginName)) { return $true }
     return $false
-  }
-  catch {
+  } catch {
     return $false
   }
 }
@@ -726,26 +763,25 @@ function Test-TuiPluginPresent([string]$PluginName) {
     foreach ($p in (ConvertTo-StringArraySafe $tui['plugin'])) {
       if ($p -eq $entry) { return $true }
     }
-  }
-  catch {}
+  } catch {}
   return $false
 }
 
 function Test-OmoRouteConfigPresent {
   $base = Get-OmoConfigBaseName
-  foreach ($name in @("$base.jsonc", "$base.json", "oh-my-openagent.jsonc", "oh-my-openagent.json", "oh-my-opencode.jsonc", "oh-my-opencode.json")) {
+  foreach ($name in @("$base.jsonc","$base.json","oh-my-openagent.jsonc","oh-my-openagent.json","oh-my-opencode.jsonc","oh-my-opencode.json")) {
     if (Test-Path -LiteralPath (Join-Path $ConfigDir $name)) { return $true }
   }
   return $false
 }
 
-function Ensure-OmoInstalledAndConfigured([bool]$Force = $false) {
+function Ensure-OmoInstalledAndConfigured([bool]$Force=$false) {
   if (!(ConfBool "INSTALL_OMO" $true)) { Write-Color "  [跳过] INSTALL_OMO=0，已跳过 OMO。" Yellow; return $false }
 
   $primary = Get-OmoPackageName
   $pluginName = Get-OmoPluginName
   $ok = Install-NpmPackageIfNeeded "$primary@latest" $primary "OMO" $Force
-  $pkg = if ($ok -and (Get-LocalNpmPackageVersion $primary)) { $primary } else { "" }
+  $pkg = if($ok -and (Get-LocalNpmPackageVersion $primary)) { $primary } else { "" }
 
   if (!$pkg -and $primary -ne 'oh-my-opencode') {
     Write-Color "⚠️ 首选 OMO 包失败或未找到，尝试备用包 oh-my-opencode。" Yellow
@@ -765,8 +801,7 @@ function Ensure-OmoInstalledAndConfigured([bool]$Force = $false) {
     Ensure-PortableConfigNodeDependencies 'OMO 插件 SDK 与 comment-checker' | Out-Null
     if ($isUpdateMode -and !$Force -and $alreadyHealthy) {
       Write-Color "✅ OMO 配置已完整，更新模式跳过官方安装器重复写入。" Green
-    }
-    else {
+    } else {
       Invoke-OmoInstallerIfAvailable $pkg
     }
     Ensure-OpenCodePlugin $pluginName | Out-Null
@@ -781,8 +816,7 @@ function Ensure-OmoInstalledAndConfigured([bool]$Force = $false) {
     }
     if (Test-OmoConfigPluginPresent $pluginName) {
       Write-Color "✅ OMO 已安装并启用：包 '$pkg'，OpenCode 插件 '$pluginName'。" Green
-    }
-    else {
+    } else {
       Write-Color "⚠️ OMO 包已安装，但插件 '$pluginName' 修复后仍未出现在 opencode.json 中。请检查 config\opencode\opencode.json。" Yellow
       return $false
     }
@@ -822,7 +856,7 @@ function Remove-OmoPluginEntriesFromConfigObject([hashtable]$Cfg) {
 
 
 function New-IsolatedRuntimeConfigDir {
-  param([string]$Name = "runtime")
+  param([string]$Name="runtime")
   $runtimeDir = Join-Path $StateDir $Name
   $runtimeConfigDir = Join-Path $runtimeDir "config"
   New-Item -ItemType Directory -Force -Path $runtimeConfigDir | Out-Null
@@ -842,7 +876,7 @@ function Set-IsolatedRuntimeConfigEnv {
 }
 
 function New-MinimalRuntimeOpenCodeConfig {
-  param([string]$Name = "runtime-empty")
+  param([string]$Name="runtime-empty")
   $runtimeConfigDir = New-IsolatedRuntimeConfigDir $Name
   $runtimeConfig = Join-Path $runtimeConfigDir "opencode.json"
 
@@ -876,7 +910,7 @@ function New-RuntimeOpenCodeConfig {
 
   if ($DisableOmo) {
     Remove-OmoPluginEntriesFromConfigObject $cfg
-    foreach ($key in @('agent', 'agents')) {
+    foreach ($key in @('agent','agents')) {
       if ($cfg.ContainsKey($key)) { [void]$cfg.Remove($key) }
     }
   }
@@ -905,4 +939,3 @@ function Get-MissingEnvReferencesFromConfigFile([string]$Path) {
   }
   return @($missing)
 }
-
