@@ -1,4 +1,4 @@
-
+﻿
 $ErrorActionPreference = "Stop"
 $script:PortableVersion = "V1.0.9"
 $script:ProductName = "OpenCode Pocket Kit"
